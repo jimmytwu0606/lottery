@@ -348,12 +348,14 @@ function getPercentile(score,dist){
 }
 
 function patternRating(pct){
-  const top=100-pct;
-  if(pct>=95)return{label:"極強 Top "+top+"%",detail:"規律指數贏過 "+pct+"% 的隨機組合",color:"#D85A30",bg:"#FAECE7"};
-  if(pct>=80)return{label:"偏強 Top "+top+"%",detail:"規律指數贏過 "+pct+"% 的隨機組合",color:"#BA7517",bg:"#FAEEDA"};
-  if(pct>=50)return{label:"中等 Top "+top+"%",detail:"規律指數贏過 "+pct+"% 的隨機組合",color:"#3B6D11",bg:"#EAF3DE"};
-  if(pct>=20)return{label:"偏弱 Top "+top+"%",detail:"規律指數贏過 "+pct+"% 的隨機組合",color:"#185FA5",bg:"#E6F1FB"};
-  return          {label:"較低 Top "+top+"%",detail:"規律指數贏過 "+pct+"% 的隨機組合",color:"#888780",bg:"#EDECEA"};
+  // top = 前百分之幾，最低顯示 1%
+  const top = Math.max(1, 100 - pct);
+  const detail = "規律指數贏過 " + pct + "% 的隨機組合";
+  if(pct>=95) return{label:"極強 前 "+top+"%", detail, color:"#D85A30", bg:"#FAECE7"};
+  if(pct>=80) return{label:"偏強 前 "+top+"%", detail, color:"#BA7517", bg:"#FAEEDA"};
+  if(pct>=50) return{label:"中等 前 "+top+"%", detail, color:"#3B6D11", bg:"#EAF3DE"};
+  if(pct>=20) return{label:"偏弱 前 "+top+"%", detail, color:"#185FA5", bg:"#E6F1FB"};
+  return           {label:"較低 前 "+top+"%", detail, color:"#888780", bg:"#EDECEA"};
 }
 
 // ── UI ─────────────────────────────────────────────────
