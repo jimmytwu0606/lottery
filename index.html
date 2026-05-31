@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>台灣彩券選號分析工具</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Microsoft JhengHei","微軟正黑體",sans-serif;background:#F5F4F0;color:#2C2C2A;display:flex;height:100vh;overflow:hidden}
+#sidebar{width:164px;background:#2C2C2A;display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto}
+#sidebar h1{color:#F1EFE8;font-size:13px;padding:14px 14px 10px;border-bottom:1px solid #3a3a38;letter-spacing:.04em}
+.sec-lbl{color:#888780;font-size:10px;padding:10px 14px 3px;letter-spacing:.06em}
+.game-btn{display:block;width:100%;text-align:left;padding:9px 14px;background:none;border:none;border-left:3px solid transparent;color:#B4B2A9;font-size:12px;font-family:inherit;cursor:pointer}
+.game-btn:hover{background:#3a3a38}
+.game-btn.active{background:#444441;color:#F1EFE8;font-weight:600}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#555;margin-right:6px;vertical-align:middle}
+.dot.ok{background:#639922}
+#sidebar-footer{margin-top:auto;padding:10px 14px;border-top:1px solid #3a3a38}
+#main{flex:1;padding:18px 22px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+/* upload */
+#upload-zone{background:#fff;border:2px dashed #ccc;border-radius:12px;padding:32px;text-align:center;cursor:pointer;transition:all .2s}
+#upload-zone:hover,#upload-zone.drag{border-color:#D85A30;background:#FFF8F6}
+#file-input{display:none}
+#progress-area{display:none}
+.prog-item{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #eee;font-size:13px}
+.prog-icon{min-width:20px;text-align:center}
+.prog-name{flex:1;color:#5F5E5A;font-size:12px}
+.prog-status{font-size:11px;min-width:60px;text-align:right;color:#888}
+/* app */
+#app-content{display:none;flex-direction:column;gap:14px}
+#main-title{font-size:18px;font-weight:700}
+#game-desc{font-size:12px;color:#888;margin-top:2px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.card{background:#EDECEA;border-radius:8px;padding:10px 12px;text-align:center}
+.card-val{font-size:18px;font-weight:700;margin-bottom:2px}
+.card-lbl{font-size:10px;color:#888}
+/* tabs */
+.tabs{display:flex;border-bottom:1px solid #e0dedd;overflow-x:auto}
+.tab-btn{padding:8px 14px;border:none;border-bottom:2px solid transparent;background:none;font-size:12px;font-family:inherit;cursor:pointer;color:#888;white-space:nowrap;margin-bottom:-1px}
+.tab-btn.active{color:#2C2C2A;font-weight:600}
+.tab-pane{display:none;padding-top:14px}
+.tab-pane.active{display:block}
+/* strategy */
+.strat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.strat-btn{padding:9px 8px;border:1.5px solid #ddd;border-radius:8px;background:#fff;font-size:12px;font-family:inherit;cursor:pointer;text-align:left}
+.strat-btn.active{font-weight:600}
+.strat-sub{font-size:10px;color:#aaa;margin-top:2px}
+/* result */
+#result-box{background:#EDECEA;border-radius:10px;padding:16px;text-align:center;min-height:80px}
+#result-placeholder{color:#888;font-size:13px;padding:8px 0}
+#balls-row{display:none;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap}
+.ball{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff}
+.ball-digit{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff}
+.ball-second{width:40px;height:40px;border-radius:50%;background:#378ADD;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff}
+.plus-sign{font-size:18px;color:#888}
+#score-row{margin-top:8px;font-size:12px;color:#5F5E5A}
+#odds-panel{display:none;margin-top:12px;background:#fff;border-radius:8px;border:1px solid #e8e7e4;padding:12px 14px;border-top:3px solid #ccc}
+.odds-table{width:100%;border-collapse:collapse;font-size:12px}
+.odds-table th{text-align:left;padding:4px 6px;color:#888;font-weight:500;border-bottom:1px solid #e8e7e4}
+.odds-table td{padding:5px 6px;border-bottom:1px solid #f0efed}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+#gen-btn{padding:12px;border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;width:100%;margin-top:2px}
+/* freq */
+.freq-grid{display:grid;gap:4px}
+.freq-cell{border-radius:6px;padding:5px 2px;text-align:center;font-size:11px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.freq-cell:hover{opacity:.8}
+.freq-num{font-size:9px;opacity:.65;margin-bottom:1px}
+/* rank */
+.rank-list{display:flex;flex-direction:column}
+.rank-row{display:flex;align-items:center;gap:7px;padding:6px 0;border-bottom:1px solid #e8e7e4}
+.rank-n{font-size:10px;color:#aaa;min-width:16px;text-align:right}
+.mini-ball{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;flex-shrink:0}
+.bar-wrap{flex:1;height:5px;background:#e0dedd;border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px}
+.cnt-lbl{font-size:11px;color:#888;min-width:70px;text-align:right}
+.sec-title{font-size:12px;font-weight:600;color:#5F5E5A;margin-bottom:8px}
+.note{font-size:10px;color:#aaa;margin-top:10px;text-align:center}
+/* pattern grid */
+.pattern-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.pattern-card{background:#fff;border-radius:10px;border:1px solid #e8e7e4;padding:12px;cursor:pointer;transition:all .15s;position:relative}
+.pattern-card:hover{border-color:#ccc;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.pattern-card.selected{border-width:2px}
+.pc-header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.pc-ball{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;flex-shrink:0}
+.pc-num{font-size:15px;font-weight:700}
+.pc-state{font-size:11px;margin-left:auto;white-space:nowrap}
+.pc-rows{display:flex;flex-direction:column;gap:5px}
+.pc-row{display:flex;justify-content:space-between;align-items:center;font-size:11px}
+.pc-label{color:#888}
+.pc-val{font-weight:600;color:#2C2C2A}
+.mini-trend{display:flex;gap:2px;align-items:flex-end;height:24px;margin-top:2px}
+.mini-bar{width:8px;border-radius:2px 2px 0 0;background:#ddd;transition:height .3s}
+/* pattern detail */
+#pattern-detail{display:none;background:#fff;border-radius:10px;border:1px solid #e8e7e4;padding:16px;margin-top:4px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.detail-box{background:#F5F4F0;border-radius:8px;padding:12px}
+.detail-title{font-size:11px;font-weight:600;color:#888;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em}
+.detail-big{font-size:24px;font-weight:700;color:#2C2C2A;margin-bottom:2px}
+.detail-sub{font-size:11px;color:#888}
+.trend-row{display:flex;gap:4px;align-items:flex-end;height:40px;margin:10px 0}
+.trend-bar-wrap{display:flex;flex-direction:column;align-items:center;gap:2px;flex:1}
+.trend-bar{width:100%;border-radius:3px 3px 0 0;background:#ddd;transition:height .3s}
+.trend-lbl{font-size:9px;color:#aaa}
+/* pair change */
+.pair-change-row{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid #f0efed;font-size:12px}
+.change-arrow{font-size:14px;min-width:18px}
+.second-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.second-cell{border-radius:6px;padding:7px 8px;text-align:center;font-size:12px;font-weight:600;min-width:48px}
+body.dragover #upload-zone{border-color:#D85A30;background:#FAECE7;transform:scale(1.01)}
+
+.hist-card{background:#fff;border-radius:8px;border:1px solid #e8e7e4;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:border-color .15s}
+.hist-card:hover{border-color:#ccc}
+.hist-ball{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;font-size:11px;font-weight:700;color:#fff;margin-right:3px}
+.hist-expand{margin-top:8px;border-top:1px solid #eee;padding-top:8px}
+.sort-opt.active{font-weight:600}
+body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
+
+#github-load-btn{background:#2C2C2A;color:#F1EFE8;border:none;border-radius:8px;
+  padding:12px 32px;font-size:15px;font-weight:700;font-family:inherit;
+  cursor:pointer;margin-top:16px;display:inline-block}
+#github-load-btn:hover{opacity:.88}
+#github-load-btn:disabled{opacity:.5;cursor:default}
+#load-status{font-size:12px;color:#888;margin-top:10px;min-height:18px}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>台灣彩券分析</h1>
+  <div class="sec-lbl">傳統型</div>
+  <button class="game-btn" onclick="switchGame('今彩539')"><span class="dot" id="dot-今彩539"></span>今彩 539</button>
+  <button class="game-btn" onclick="switchGame('威力彩')"><span class="dot" id="dot-威力彩"></span>威力彩</button>
+  <button class="game-btn" onclick="switchGame('大樂透')"><span class="dot" id="dot-大樂透"></span>大樂透</button>
+  <div class="sec-lbl">樂合彩</div>
+  <button class="game-btn" onclick="switchGame('39樂合彩')"><span class="dot" id="dot-39樂合彩"></span>39 樂合彩</button>
+  <button class="game-btn" onclick="switchGame('49樂合彩')"><span class="dot" id="dot-49樂合彩"></span>49 樂合彩</button>
+  <div class="sec-lbl">數字型</div>
+  <button class="game-btn" onclick="switchGame('3星彩')"><span class="dot" id="dot-3星彩"></span>3 星彩</button>
+  <button class="game-btn" onclick="switchGame('4星彩')"><span class="dot" id="dot-4星彩"></span>4 星彩</button>
+  <div id="sidebar-footer">
+    <div style="font-size:10px;color:#888780">資料狀態</div>
+    <div id="status-txt" style="font-size:11px;color:#E27D4A;margin-top:2px">尚未載入</div>
+    <button style="margin-top:8px;width:100%;padding:5px;border:1px solid #555;border-radius:5px;background:none;color:#888;font-size:11px;cursor:pointer" onclick="showUpload()">重新載入</button>
+  </div>
+</div>
+
+<div id="main">
+  <div id="upload-zone">
+    <div style="font-size:40px;margin-bottom:12px">🎰</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:8px">台灣彩券選號分析工具</div>
+    <div style="font-size:13px;color:#888;margin-bottom:4px">jimmytwu0606 / lottery</div>
+
+    <button id="github-load-btn" onclick="loadFromGitHub()">⚡ 自動載入最新資料</button>
+    <div id="load-status"></div>
+
+    <div style="margin:20px 0;display:flex;align-items:center;gap:10px">
+      <div style="flex:1;height:1px;background:#e0dedd"></div>
+      <span style="font-size:12px;color:#aaa">或手動上傳</span>
+      <div style="flex:1;height:1px;background:#e0dedd"></div>
+    </div>
+    <div style="font-size:13px;color:#888;line-height:1.8;margin-bottom:10px">
+      支援 <strong>CSV</strong>，可一次選多個年份
+    </div>
+    <button class="upload-btn" onclick="document.getElementById('file-input').click()">📂 選取檔案</button>
+    <div style="margin-top:10px;font-size:12px;color:#bbb">或將檔案拖曳到此頁面</div>
+    <input type="file" id="file-input" multiple accept=".zip,.csv" onchange="handleFiles(this.files)">
+  </div>
+
+  <div id="progress-area">
+    <div style="font-size:14px;font-weight:600;margin-bottom:10px">處理中...</div>
+    <div id="prog-list"></div>
+  </div>
+
+  <div id="app-content">
+    <div>
+      <div id="main-title" style="font-size:18px;font-weight:700"></div>
+      <div id="game-desc" style="font-size:12px;color:#888;margin-top:2px"></div>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="card-val" id="c-total">-</div><div class="card-lbl">歷史期數</div></div>
+      <div class="card"><div class="card-val" id="c-hot">-</div><div class="card-lbl">最熱號碼</div></div>
+      <div class="card"><div class="card-val" id="c-cold">-</div><div class="card-lbl">最冷號碼</div></div>
+      <div class="card"><div class="card-val" id="c-jack">-</div><div class="card-lbl">頭獎機率</div></div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('pick',this)">選號產生器</button>
+      <button class="tab-btn" onclick="switchTab('freq',this)">頻率分析</button>
+      <button class="tab-btn" onclick="switchTab('pairs',this)">配對分析</button>
+      <button class="tab-btn" onclick="switchTab('pattern',this)">號碼規律</button>
+      <button class="tab-btn" onclick="switchTab('pairchange',this)">關聯變化</button>
+      <button class="tab-btn" onclick="switchTab('odds',this)">中獎機率表</button>
+    </div>
+
+    <!-- 選號 -->
+    <div class="tab-pane active" id="tab-pick">
+      <div class="sec-title">選號策略</div>
+      <div class="strat-grid" id="strat-grid"></div>
+      <br>
+      <div id="result-box">
+        <div id="result-placeholder">選好策略後按下方按鈕產生號碼</div>
+        <div id="balls-row" style="display:none"></div>
+        <div id="score-row"></div>
+        <div id="pattern-index-row" style="display:none;margin-top:10px;border-radius:8px;padding:10px 12px;border-left:4px solid #ccc"></div>
+        <div id="odds-panel">
+          <div style="font-size:12px;font-weight:600;color:#5F5E5A;margin-bottom:8px">🎯 這組號碼的中獎機率</div>
+          <table class="odds-table">
+            <thead><tr><th>獎項</th><th>條件</th><th>機率</th><th>難度</th></tr></thead>
+            <tbody id="odds-body"></tbody>
+          </table>
+          <div style="font-size:10px;color:#aaa;margin-top:8px;text-align:center" id="odds-note"></div>
+        </div>
+      </div>
+      <br>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="font-size:12px;color:#888">產生組數：</span>
+        <div id="count-btn-wrap" style="display:flex;gap:6px">
+          <button data-count="1"  onclick="setGenCount(1)"  style="padding:6px 18px;border:1.5px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;cursor:pointer;font-weight:600;background:transparent;color:#888">1 組</button>
+          <button data-count="10" onclick="setGenCount(10)" style="padding:6px 18px;border:1.5px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;cursor:pointer;font-weight:600;background:transparent;color:#888">10 組</button>
+        </div>
+      </div>
+      <button id="gen-btn" onclick="generate()">✨ 產生號碼</button>
+      <div style="margin-top:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div class="sec-title" style="margin:0">📋 產生紀錄（最近50筆）</div>
+          <button onclick="clearHistory()" style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">清除</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:8px">
+          <span style="font-size:10px;color:#aaa">排序：</span>
+          <button class="hist-sort active" data-hsort="time"     onclick="setHistSort('time')"     style="font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">時間↓</button>
+          <button class="hist-sort"        data-hsort="pat_desc" onclick="setHistSort('pat_desc')" style="font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">規律↓</button>
+          <button class="hist-sort"        data-hsort="pat_asc"  onclick="setHistSort('pat_asc')"  style="font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">規律↑</button>
+          <button class="hist-sort"        data-hsort="co_desc"  onclick="setHistSort('co_desc')"  style="font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">共現↓</button>
+          <button class="hist-sort"        data-hsort="co_asc"   onclick="setHistSort('co_asc')"   style="font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">共現↑</button>
+        </div>
+        <div id="history-list"></div>
+      </div>
+    </div>
+
+    <!-- 頻率 -->
+    <div class="tab-pane" id="tab-freq">
+      <div class="sec-title" id="freq-title">號碼出現次數</div>
+      <div class="freq-grid" id="freq-grid"></div>
+      <div id="second-section" style="display:none">
+        <br><div class="sec-title">第二區（威力號）出現次數</div>
+        <div class="second-row" id="second-row"></div>
+      </div>
+      <div class="note" id="history-note"></div>
+    </div>
+
+    <!-- 配對 -->
+    <div class="tab-pane" id="tab-pairs">
+      <div id="pairs-content"></div>
+    </div>
+
+    <!-- 號碼規律 -->
+    <div class="tab-pane" id="tab-pattern">
+      <div style="margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <div class="sec-title" style="margin:0">每個號碼的出現規律</div>
+          <div style="display:flex;gap:5px;margin-left:auto;flex-wrap:wrap">
+            <button class="badge" style="background:#FAECE7;color:#993C1D;cursor:pointer;border:none" onclick="renderPattern('hot')">🔥熱號</button>
+            <button class="badge" style="background:#E6F1FB;color:#185FA5;cursor:pointer;border:none" onclick="renderPattern('cold')">❄️冷號</button>
+            <button class="badge" style="background:#EAF3DE;color:#3B6D11;cursor:pointer;border:none" onclick="renderPattern('rising')">📈升溫</button>
+            <button class="badge" style="background:#FCEBEB;color:#A32D2D;cursor:pointer;border:none" onclick="renderPattern('cooling')">📉降溫</button>
+            <button class="badge" style="background:#EDECEA;color:#5F5E5A;cursor:pointer;border:none" onclick="renderPattern('all')">全部</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+          <span style="font-size:10px;color:#aaa;white-space:nowrap">排序：</span>
+          <button class="sort-opt active" data-sort="default"    onclick="setSort('default')"      style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">預設</button>
+          <button class="sort-opt" data-sort="freq_desc"         onclick="setSort('freq_desc')"    style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">出現次數↓</button>
+          <button class="sort-opt" data-sort="freq_asc"          onclick="setSort('freq_asc')"     style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">出現次數↑</button>
+          <button class="sort-opt" data-sort="lastgap_desc"      onclick="setSort('lastgap_desc')" style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">距今已隔↓</button>
+          <button class="sort-opt" data-sort="lastgap_asc"       onclick="setSort('lastgap_asc')"  style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">距今已隔↑</button>
+          <button class="sort-opt" data-sort="trend_desc"        onclick="setSort('trend_desc')"   style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">熱度分數↓</button>
+          <button class="sort-opt" data-sort="trend_asc"         onclick="setSort('trend_asc')"    style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">熱度分數↑</button>
+          <button class="sort-opt" data-sort="miss_desc"         onclick="setSort('miss_desc')"    style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">最長缺席↓</button>
+          <button class="sort-opt" data-sort="streak_miss"       onclick="setSort('streak_miss')"  style="font-size:11px;padding:3px 8px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">連缺最長↓</button>
+        </div>
+      </div>
+      <div class="pattern-grid" id="pattern-grid"></div>
+      <div id="pattern-detail"></div>
+    </div>
+
+    <!-- 關聯變化 -->
+    <div class="tab-pane" id="tab-pairchange">
+      <div id="pairchange-content"></div>
+    </div>
+
+    <!-- 中獎機率表 -->
+    <div class="tab-pane" id="tab-odds">
+      <div id="full-odds-content"></div>
+    </div>
+  </div>
+</div>
+
+<script src="jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
