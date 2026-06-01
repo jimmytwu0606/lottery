@@ -114,6 +114,20 @@ body.dragover #upload-zone{border-color:#D85A30;background:#FAECE7;transform:sca
 .sort-opt.active{font-weight:600}
 body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
 
+/* verify tab */
+.verify-input-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.verify-num-btn{width:38px;height:38px;border-radius:50%;border:2px solid #ddd;background:#fff;font-size:13px;font-weight:700;cursor:pointer;transition:all .15s}
+.verify-num-btn.selected{color:#fff;border-color:transparent}
+.verify-second-btn{width:34px;height:34px;border-radius:50%;border:2px solid #ddd;background:#fff;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s}
+.verify-second-btn.selected{background:#378ADD;color:#fff;border-color:#378ADD}
+.vcard{background:#fff;border-radius:10px;border:1px solid #e8e7e4;padding:12px 14px;margin-bottom:8px}
+.vcard-title{font-size:11px;font-weight:700;color:#888;letter-spacing:.05em;text-transform:uppercase;margin-bottom:8px}
+.vball-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
+.num-tag{display:inline-flex;align-items:center;gap:4px;background:#F5F4F0;border-radius:20px;padding:3px 10px 3px 4px;font-size:12px}
+.strat-match-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0efed;font-size:12px}
+.match-dots{display:flex;gap:3px}
+.match-dot{width:10px;height:10px;border-radius:50%}
+
 #github-load-btn{background:#2C2C2A;color:#F1EFE8;border:none;border-radius:8px;
   padding:12px 32px;font-size:15px;font-weight:700;font-family:inherit;
   cursor:pointer;margin-top:16px;display:inline-block}
@@ -137,8 +151,12 @@ body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
   <button class="game-btn" onclick="switchGame('4星彩')"><span class="dot" id="dot-4星彩"></span>4 星彩</button>
   <div id="sidebar-footer">
     <div style="font-size:10px;color:#888780">資料狀態</div>
-    <div id="status-txt" style="font-size:11px;color:#E27D4A;margin-top:2px">尚未載入</div>
-    <button style="margin-top:8px;width:100%;padding:5px;border:1px solid #555;border-radius:5px;background:none;color:#888;font-size:11px;cursor:pointer" onclick="showUpload()">重新載入</button>
+    <div id="status-txt" style="font-size:11px;color:#E27D4A;margin-top:2px">載入中...</div>
+    <button id="refresh-btn"
+      style="display:none;margin-top:8px;width:100%;padding:6px;border:1px solid #555;border-radius:5px;background:none;color:#aaa;font-size:11px;cursor:pointer"
+      onclick="loadFromGitHub(true)">🔄 更新資料</button>
+    <button style="margin-top:4px;width:100%;padding:5px;border:1px solid #444;border-radius:5px;background:none;color:#666;font-size:10px;cursor:pointer"
+      onclick="showUpload()">📂 手動上傳</button>
   </div>
 </div>
 
@@ -188,6 +206,7 @@ body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
       <button class="tab-btn" onclick="switchTab('pattern',this)">號碼規律</button>
       <button class="tab-btn" onclick="switchTab('pairchange',this)">關聯變化</button>
       <button class="tab-btn" onclick="switchTab('odds',this)">中獎機率表</button>
+      <button class="tab-btn" onclick="switchTab('verify',this)">🎯 開獎驗證</button>
     </div>
 
     <!-- 選號 -->
@@ -289,6 +308,11 @@ body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
     <!-- 中獎機率表 -->
     <div class="tab-pane" id="tab-odds">
       <div id="full-odds-content"></div>
+    </div>
+
+    <!-- 開獎驗證 -->
+    <div class="tab-pane" id="tab-verify">
+      <div id="verify-content"></div>
     </div>
   </div>
 </div>

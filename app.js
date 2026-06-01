@@ -3,11 +3,136 @@ const GITHUB_OWNER  = "jimmytwu0606";
 const GITHUB_REPO   = "lottery";
 const CSV_FOLDER    = "";  // CSV 放 repo 根目錄；改成 "data" 就是 data/ 子目錄
 
-async function loadFromGitHub(){
+// ── Google Sheets API ──────────────────────────────────
+const GS_API = "https://script.google.com/macros/s/AKfycbwMyThlYMP3pLTr_cKLO5sgLhFV51vZnzHqDa0gyxLPffhA-35iz-0K7dioKwWlXcvr/exec";
+
+async function gsPost(action, data){
+  try{
+    await fetch(GS_API, {
+      method:"POST", mode:"no-cors",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action, data})
+    });
+    return {ok:true};
+  } catch(e){
+    console.warn("GS write failed:", e);
+    return {ok:false, error:e.message};
+  }
+}
+
+async function gsGet(sheet, limit=100){
+  try{
+    const url = GS_API + "?action=read&sheet="+sheet+"&limit="+limit;
+    const res = await fetch(url);
+    return await res.json();
+  } catch(e){
+    console.warn("GS read failed:", e);
+    return {ok:false, rows:[]};
+  }
+}
+
+
+// ── 快取設定 ───────────────────────────────────────────
+const CACHE_KEY     = "lottery_csv_cache";
+const CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24小時（毫秒）
+
+function saveCache(csvMap){
+  try{
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      ts: Date.now(),
+      csvMap
+    }));
+  } catch(e){ console.warn("快取寫入失敗（可能空間不足）", e); }
+}
+
+function loadCache(){
+  try{
+    const raw = localStorage.getItem(CACHE_KEY);
+    if(!raw) return null;
+    const obj = JSON.parse(raw);
+    if(!obj || !obj.ts || !obj.csvMap) return null;
+    const age = Date.now() - obj.ts;
+    if(age > CACHE_MAX_AGE) return null; // 過期
+    return obj;
+  } catch(e){ return null; }
+}
+
+function clearCache(){
+  localStorage.removeItem(CACHE_KEY);
+}
+
+function cacheAgeText(ts){
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if(mins < 1)   return "剛剛更新";
+  if(mins < 60)  return mins + " 分鐘前";
+  const hrs = Math.floor(mins / 60);
+  if(hrs < 24)   return hrs + " 小時前";
+  return Math.floor(hrs / 24) + " 天前";
+}
+
+// ── 啟動時自動嘗試快取 ─────────────────────────────────
+window.addEventListener("DOMContentLoaded", function(){
+  const cached = loadCache();
+  if(cached){
+    applyCSVMap(cached.csvMap, true, cached.ts);
+  }
+});
+
+// ── 從 csvMap 建立 DB 並顯示 UI ─────────────────────────
+function applyCSVMap(csvMap, fromCache, cacheTs){
+  let loaded = 0;
+  for(const [game, list] of Object.entries(csvMap)){
+    try{
+      DB[game] = analyzeCSVs(game, list);
+      loaded++;
+      const d = document.getElementById("dot-" + game);
+      if(d) d.className = "dot ok";
+    } catch(e){ console.error(game, e); }
+  }
+  if(!loaded) return false;
+
+  document.getElementById("upload-zone").style.display = "none";
+  const ac = document.getElementById("app-content");
+  ac.style.display = "flex"; ac.style.flexDirection = "column"; ac.style.gap = "14px";
+  switchGame(Object.keys(DB)[0] || "今彩539");
+
+  const tot = Object.values(DB).reduce((s,d) => s + d.total, 0);
+  const statusEl = document.getElementById("status-txt");
+  if(fromCache){
+    statusEl.innerHTML = "✓ " + loaded + "種 " + tot.toLocaleString() + "期<br>"
+      + "<span style='font-size:10px;color:#888780'>" + cacheAgeText(cacheTs) + "（快取）</span>";
+  } else {
+    statusEl.textContent = "✓ " + loaded + "種 " + tot.toLocaleString() + "期";
+  }
+  statusEl.style.color = "#639922";
+
+  // 更新側邊欄按鈕
+  const refreshBtn = document.getElementById("refresh-btn");
+  if(refreshBtn) refreshBtn.style.display = "block";
+
+  return true;
+}
+
+// ── 強制從 GitHub 重新下載 ─────────────────────────────
+async function loadFromGitHub(forceRefresh){
   const statusEl = document.getElementById("load-status");
   const btn      = document.getElementById("github-load-btn");
+
+  // 如果不是強制刷新，先看快取
+  if(!forceRefresh){
+    const cached = loadCache();
+    if(cached){
+      const ok = applyCSVMap(cached.csvMap, true, cached.ts);
+      if(ok){
+        if(statusEl) statusEl.textContent = "✅ 已從快取載入（" + cacheAgeText(cached.ts) + "）";
+        if(btn){ btn.disabled = false; btn.textContent = "⚡ 自動載入最新資料"; }
+        return;
+      }
+    }
+  }
+
   if(statusEl) statusEl.textContent = "掃描 GitHub 檔案中...";
-  if(btn){ btn.disabled = true; btn.textContent = "載入中..."; }
+  if(btn){ btn.disabled = true; btn.textContent = "下載中..."; }
 
   try {
     const folder  = CSV_FOLDER ? CSV_FOLDER + "/" : "";
@@ -16,7 +141,11 @@ async function loadFromGitHub(){
     if(!res.ok) throw new Error("GitHub API 回應 " + res.status);
     const files   = await res.json();
     const csvFiles = files.filter(f => f.name.toLowerCase().endsWith(".csv"));
-    if(!csvFiles.length){ if(statusEl) statusEl.textContent = "⚠️ 找不到 CSV 檔案，請先上傳資料"; return; }
+    if(!csvFiles.length){
+      if(statusEl) statusEl.textContent = "⚠️ 找不到 CSV 檔案";
+      if(btn){ btn.disabled = false; btn.textContent = "⚡ 重試"; }
+      return;
+    }
 
     if(statusEl) statusEl.textContent = "找到 " + csvFiles.length + " 個 CSV，下載中...";
 
@@ -31,23 +160,12 @@ async function loadFromGitHub(){
       csvMap[g].push({name: file.name, content});
     }
 
-    let loaded = 0;
-    for(const [game, list] of Object.entries(csvMap)){
-      try{
-        DB[game] = analyzeCSVs(game, list);
-        loaded++;
-        const d = document.getElementById("dot-" + game);
-        if(d) d.className = "dot ok";
-      } catch(e){ console.error(game, e); }
-    }
+    // 存快取
+    saveCache(csvMap);
 
-    document.getElementById("upload-zone").style.display = "none";
-    const ac = document.getElementById("app-content");
-    ac.style.display = "flex"; ac.style.flexDirection = "column"; ac.style.gap = "14px";
-    switchGame(Object.keys(DB)[0] || "今彩539");
-    const tot = Object.values(DB).reduce((s,d) => s + d.total, 0);
-    document.getElementById("status-txt").textContent  = "✓ " + loaded + "種 " + tot.toLocaleString() + "期";
-    document.getElementById("status-txt").style.color = "#639922";
+    applyCSVMap(csvMap, false, Date.now());
+    if(statusEl) statusEl.textContent = "✅ 下載完成，已更新快取";
+    if(btn){ btn.disabled = false; btn.textContent = "⚡ 自動載入最新資料"; }
 
   } catch(err){
     console.error(err);
@@ -372,7 +490,7 @@ function switchGame(g){
   document.getElementById("game-desc").textContent=DB[g].desc||"";
   document.getElementById("gen-btn").style.background=gc(g);
   renderCards();renderStrats();renderCountBtns();renderFreq();renderPairs();
-  renderPattern(patternFilter);renderPairChange();renderFullOdds();
+  renderPattern(patternFilter);renderPairChange();renderFullOdds();renderVerify();
   clearResult();renderHistory();
 }
 
@@ -790,11 +908,14 @@ function generate(){
 
   // 每組都加進去
   results.forEach(rec=>{
-    genHistory[currentGame].unshift({
+    const histRec = {
       nums:rec.nums.slice(),second:rec.second,
       co:rec.co,pScore:rec.pScore,pPct:rec.pPct,pRat:rec.pRat,
       pairNote:rec.pairNote,strat,time
-    });
+    };
+    genHistory[currentGame].unshift(histRec);
+    // 存入 Google Sheets
+    saveGenToGS(histRec);
   });
   if(genHistory[currentGame].length>50)genHistory[currentGame]=genHistory[currentGame].slice(0,50);
   renderHistory();
@@ -890,3 +1011,623 @@ function showUpload(){
   document.getElementById("progress-area").style.display="none";
 }
 
+// ═══════════════════════════════════════════════════════
+// 開獎驗證 ── 今日中獎號碼 × 歷史規律分析
+// ═══════════════════════════════════════════════════════
+
+let verifySelected = [];      // 主區選號
+let verifySecond   = null;    // 第二區（威力彩用）
+let verifySpecial  = null;    // 特別號（大樂透用）
+
+// ── 渲染整個 verify 分頁 ────────────────────────────────
+function renderVerify(){
+  const cont = document.getElementById("verify-content");
+  if(!cont) return;
+  if(!currentGame || !DB[currentGame]){
+    cont.innerHTML = "<div style='color:#aaa;font-size:13px;padding:20px 0;text-align:center'>請先載入彩券資料</div>";
+    return;
+  }
+  const db  = DB[currentGame];
+  const cfg = GAME_CFG[currentGame];
+  const color = gc(currentGame);
+
+  // 重置選號（換彩種時清空）
+  verifySelected = [];
+  verifySecond   = null;
+  verifySpecial  = null;
+
+  // ── 標題 ──
+  let html = `
+  <div style="margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700;color:${color};margin-bottom:3px">🎯 開獎號碼驗證</div>
+    <div style="font-size:11px;color:#888">輸入今日 ${currentGame} 的中獎號碼，分析與歷史規律的關聯</div>
+  </div>`;
+
+  // ── 號碼選擇區 ──
+  const isDigit = cfg.isDigit;
+  const pick = cfg.pick;
+  const range = cfg.mainRange;
+
+  html += `<div class="vcard">
+    <div class="vcard-title">貼上開獎號碼</div>
+    <div style="display:flex;gap:6px;align-items:stretch;margin-bottom:14px">
+      <input id="verify-paste-input" type="text" placeholder="例：03、08、09、15、24、35，第二區 04"
+        style="flex:1;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;font-family:inherit;color:#2C2C2A;outline:none;transition:border-color .15s"
+        oninput="onVerifyPasteInput(this)"
+        onkeydown="if(event.key==='Enter')parseVerifyPaste()"
+        onfocus="this.style.borderColor='${color}'"
+        onblur="this.style.borderColor='#ddd'"
+      />
+      <button onclick="parseVerifyPaste()"
+        style="padding:9px 16px;background:${color};color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">解析</button>
+    </div>
+    <div id="verify-paste-hint" style="font-size:11px;color:#aaa;margin-top:-10px;margin-bottom:10px"></div>
+    <div class="vcard-title">或手動點選主區號碼（${pick} 個）</div>
+    <div id="verify-main-grid" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">`;
+
+  if(isDigit){
+    for(let i=0;i<range;i++){
+      html += `<button class="verify-num-btn" id="vmb-${i}" onclick="toggleVerifyNum(${i})" style="background:#fff;color:#2C2C2A">${i}</button>`;
+    }
+  } else {
+    for(let i=1;i<=range;i++){
+      html += `<button class="verify-num-btn" id="vmb-${i}" onclick="toggleVerifyNum(${i})" style="background:#fff;color:#2C2C2A">${String(i).padStart(2,'0')}</button>`;
+    }
+  }
+  html += `</div>`;
+
+  // 第二區（威力彩）
+  if(cfg.secondRange>0){
+    html += `<div class="vcard-title" style="margin-top:8px">第二區（1–${cfg.secondRange}）</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">`;
+    for(let i=1;i<=cfg.secondRange;i++){
+      html += `<button class="verify-second-btn" id="vsb-${i}" onclick="toggleVerifySecond(${i})">${i}</button>`;
+    }
+    html += `</div>`;
+  }
+
+  // 特別號（大樂透）
+  if(cfg.specialCol){
+    html += `<div class="vcard-title" style="margin-top:8px">特別號（1–${cfg.mainRange}）</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px">`;
+    for(let i=1;i<=cfg.mainRange;i++){
+      html += `<button class="verify-second-btn" id="vsp-${i}" onclick="toggleVerifySpecial(${i})" style="background:#fff;color:#2C2C2A;border:2px solid #ddd">${String(i).padStart(2,'0')}</button>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `<div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+    <button onclick="analyzeVerify()" id="verify-go-btn"
+      style="padding:10px 24px;background:${color};color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;font-family:inherit;cursor:pointer;opacity:.5"
+      disabled>📊 分析這組號碼</button>
+    <button onclick="clearVerify()"
+      style="padding:10px 14px;background:#EDECEA;color:#5F5E5A;border:none;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer">清除</button>
+    <span id="verify-count-hint" style="font-size:11px;color:#aaa">還需選 ${pick} 個號碼</span>
+  </div></div>`;
+
+  // 分析結果容器
+  html += `<div id="verify-result"></div>`;
+
+  // Google Sheets 歷史紀錄區
+  html += `
+  <div class="vcard" style="margin-top:8px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="vcard-title" style="margin:0">☁️ Google Sheets 歷史紀錄</div>
+      <div style="display:flex;gap:5px">
+        <button onclick="loadGSHistory('verify_log')"
+          style="font-size:11px;padding:4px 10px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">開獎驗證</button>
+        <button onclick="loadGSHistory('gen_history')"
+          style="font-size:11px;padding:4px 10px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">選號紀錄</button>
+      </div>
+    </div>
+    <div id="gs-history-cont" style="font-size:12px;color:#aaa">按上方按鈕載入雲端紀錄</div>
+  </div>`;
+
+  cont.innerHTML = html;
+}
+
+// ── 切換主區號碼 ────────────────────────────────────────
+function toggleVerifyNum(n){
+  const db  = DB[currentGame];
+  const cfg = GAME_CFG[currentGame];
+  const pick = cfg.pick;
+  const color = gc(currentGame);
+  const btn = document.getElementById("vmb-"+n);
+
+  if(verifySelected.indexOf(n)>=0){
+    verifySelected = verifySelected.filter(x=>x!==n);
+    btn.style.background="#fff";
+    btn.style.color="#2C2C2A";
+    btn.style.borderColor="#ddd";
+  } else {
+    if(verifySelected.length>=pick) return; // 已滿
+    verifySelected.push(n);
+    verifySelected.sort((a,b)=>a-b);
+    btn.style.background=color;
+    btn.style.color="#fff";
+    btn.style.borderColor=color;
+  }
+  updateVerifyHint();
+}
+
+function toggleVerifySecond(n){
+  const prev = verifySecond;
+  if(prev!==null){
+    const pb = document.getElementById("vsb-"+prev);
+    if(pb){ pb.style.background=""; pb.style.color=""; pb.classList.remove("selected"); }
+  }
+  if(prev===n){ verifySecond=null; }
+  else {
+    verifySecond=n;
+    const nb = document.getElementById("vsb-"+n);
+    if(nb){ nb.classList.add("selected"); }
+  }
+  updateVerifyHint();
+}
+
+function toggleVerifySpecial(n){
+  const prev = verifySpecial;
+  if(prev!==null){
+    const pb = document.getElementById("vsp-"+prev);
+    if(pb){ pb.style.background="#fff"; pb.style.color="#2C2C2A"; pb.style.borderColor="#ddd"; }
+  }
+  if(prev===n){ verifySpecial=null; }
+  else {
+    verifySpecial=n;
+    const nb = document.getElementById("vsp-"+n);
+    if(nb){ nb.style.background="#378ADD"; nb.style.color="#fff"; nb.style.borderColor="#378ADD"; }
+  }
+  updateVerifyHint();
+}
+
+function updateVerifyHint(){
+  const cfg = GAME_CFG[currentGame];
+  const pick = cfg.pick;
+  const remaining = pick - verifySelected.length;
+  const hint = document.getElementById("verify-count-hint");
+  const btn  = document.getElementById("verify-go-btn");
+  if(!hint||!btn) return;
+  if(remaining>0){
+    hint.textContent = "還需選 "+remaining+" 個號碼";
+    btn.disabled = true; btn.style.opacity = ".5";
+  } else {
+    hint.textContent = "✓ 已選 "+pick+" 個號碼";
+    btn.disabled = false; btn.style.opacity = "1";
+  }
+}
+
+function clearVerify(){
+  renderVerify();
+}
+
+// ── 貼上文字即時 hint ───────────────────────────────────
+function onVerifyPasteInput(el){
+  const hint = document.getElementById("verify-paste-hint");
+  if(!hint) return;
+  const val = el.value.trim();
+  if(!val){ hint.textContent=""; return; }
+  // 快速預覽抽出的數字
+  const nums = val.match(/\d+/g);
+  if(!nums){ hint.textContent="⚠️ 找不到數字"; return; }
+  hint.textContent = "偵測到數字：" + nums.join("、") + "　← 按 Enter 或「解析」";
+}
+
+// ── 解析貼上文字 ────────────────────────────────────────
+function parseVerifyPaste(){
+  if(!currentGame || !DB[currentGame]) return;
+  const cfg   = GAME_CFG[currentGame];
+  const color = gc(currentGame);
+  const input = document.getElementById("verify-paste-input");
+  const hint  = document.getElementById("verify-paste-hint");
+  if(!input) return;
+
+  const raw = input.value.trim();
+  if(!raw){ if(hint) hint.textContent="⚠️ 請先貼上號碼文字"; return; }
+
+  // ── 解析策略 ──
+  // 支援：逗號、頓號、空格、斜線分隔數字
+  // 嘗試識別「第二區」「特別號」關鍵字後面的數字
+  let mainNums = [];
+  let secondNum = null;
+  let specialNum = null;
+
+  // 先找第二區
+  const secondMatch = raw.match(/第二區[^\d]*(\d+)/);
+  if(secondMatch) secondNum = parseInt(secondMatch[1]);
+
+  // 先找特別號
+  const specialMatch = raw.match(/特別號[^\d]*(\d+)/);
+  if(specialMatch) specialNum = parseInt(specialMatch[1]);
+
+  // 剩餘部分抽主區數字
+  // 去掉已識別的第二區/特別號後面的數字段
+  let mainText = raw;
+  if(secondMatch) mainText = mainText.replace(secondMatch[0], " ");
+  if(specialMatch) mainText = mainText.replace(specialMatch[0], " ");
+
+  const allNums = (mainText.match(/\d+/g)||[]).map(Number).filter(n=>{
+    if(cfg.isDigit) return n>=0 && n<cfg.mainRange;
+    return n>=1 && n<=cfg.mainRange;
+  });
+
+  // 去重、取前 pick 個
+  const seen = new Set();
+  for(const n of allNums){
+    if(!seen.has(n)){ seen.add(n); mainNums.push(n); }
+    if(mainNums.length>=cfg.pick) break;
+  }
+
+  // ── 驗證 ──
+  if(mainNums.length !== cfg.pick){
+    if(hint) hint.textContent = `⚠️ 主區需要 ${cfg.pick} 個號碼，目前解析出 ${mainNums.length} 個（${mainNums.join("、")}）`;
+    return;
+  }
+
+  // ── 套用到選號 UI ──
+  // 先清空
+  verifySelected = [];
+  verifySecond   = null;
+  verifySpecial  = null;
+
+  // 清除所有按鈕狀態
+  const allNums2 = cfg.isDigit
+    ? Array.from({length:cfg.mainRange},(_,i)=>i)
+    : Array.from({length:cfg.mainRange},(_,i)=>i+1);
+  allNums2.forEach(n=>{
+    const btn = document.getElementById("vmb-"+n);
+    if(btn){ btn.style.background="#fff"; btn.style.color="#2C2C2A"; btn.style.borderColor="#ddd"; }
+  });
+
+  // 套用主區
+  mainNums.forEach(n=>{
+    verifySelected.push(n);
+    const btn = document.getElementById("vmb-"+n);
+    if(btn){ btn.style.background=color; btn.style.color="#fff"; btn.style.borderColor=color; }
+  });
+
+  // 套用第二區
+  if(secondNum!==null && cfg.secondRange>0 && secondNum>=1 && secondNum<=cfg.secondRange){
+    verifySecond = secondNum;
+    const sb = document.getElementById("vsb-"+secondNum);
+    if(sb) sb.classList.add("selected");
+  }
+
+  // 套用特別號
+  if(specialNum!==null && cfg.specialCol && specialNum>=1 && specialNum<=cfg.mainRange){
+    verifySpecial = specialNum;
+    const sp = document.getElementById("vsp-"+specialNum);
+    if(sp){ sp.style.background="#378ADD"; sp.style.color="#fff"; sp.style.borderColor="#378ADD"; }
+  }
+
+  // 更新 hint 和按鈕狀態
+  let okMsg = `✅ 已選入：${mainNums.map(n=>String(n).padStart(2,'0')).join("、")}`;
+  if(secondNum!==null && cfg.secondRange>0) okMsg += `　第二區：${secondNum}`;
+  if(specialNum!==null && cfg.specialCol)   okMsg += `　特別號：${specialNum}`;
+  if(hint) { hint.textContent=okMsg; hint.style.color="#3B6D11"; }
+
+  updateVerifyHint();
+
+  // 如果齊了直接分析
+  if(verifySelected.length === cfg.pick){
+    analyzeVerify();
+  }
+}
+
+// ── 核心：分析選定號碼 ──────────────────────────────────
+function analyzeVerify(){
+  const db    = DB[currentGame];
+  const cfg   = GAME_CFG[currentGame];
+  const color = gc(currentGame);
+  const nums  = verifySelected.slice();
+  if(nums.length !== cfg.pick) return;
+
+  // 確保分佈已建立
+  if(!db.isDigit && !patternDistCache[currentGame]){
+    patternDistCache[currentGame] = buildPatternDist(currentGame);
+  }
+
+  const result = document.getElementById("verify-result");
+  if(!result) return;
+
+  // ── 1. 號碼球展示 ──
+  const ballsHtml = nums.map(n=>{
+    const isD = cfg.isDigit;
+    return `<span class="${isD?'ball-digit':'ball'}" style="background:${color}">${String(n).padStart(isD?1:2,'0')}</span>`;
+  }).join("");
+  let secondHtml = "";
+  if(verifySecond!==null) secondHtml += `<span class="plus-sign">+</span><span class="ball-second">${String(verifySecond).padStart(2,'0')}</span>`;
+  if(verifySpecial!==null) secondHtml += `<span class="plus-sign">特</span><span class="ball-second" style="background:#3B6D11">${String(verifySpecial).padStart(2,'0')}</span>`;
+
+  // ── 2. 規律指數 ──
+  let pScore=null, pPct=null, pRat=null;
+  if(!db.isDigit){
+    pScore = calcComboPatternScore(nums, db);
+    pPct   = getPercentile(pScore, patternDistCache[currentGame]||[]);
+    pRat   = patternRating(pPct);
+  }
+
+  // ── 3. 共現分數 ──
+  const co = coScore(nums);
+
+  // ── 4. 每個號碼的規律狀態 ──
+  function numDetail(n){
+    if(db.isDigit) return null;
+    const iv = db.intervals[n]||{avg:0,std:1,lastGap:0};
+    const tr = db.trend[n]||{state:"➡️平穩",score:0,r20:0,rAll:0};
+    const st = db.streaks[n]||{curType:"miss",curStreak:0};
+    const freq = db.freq[n]||0;
+    const total = db.total;
+    const avgFreq = total*cfg.pick/cfg.mainRange;
+
+    // 間隔狀態
+    const z = iv.std>0?(iv.lastGap-iv.avg)/iv.std:0;
+    let gapState, gapColor;
+    if(z>=2)      { gapState="🟠 嚴重超期"; gapColor="#BA7517"; }
+    else if(z>=1) { gapState="🔶 偏晚出現"; gapColor="#D85A30"; }
+    else if(z>=-1){ gapState="✅ 正常範圍"; gapColor="#3B6D11"; }
+    else          { gapState="🔵 剛出現過"; gapColor="#185FA5"; }
+
+    // 熱冷
+    const heatLabel = tr.state;
+    const freqLabel = freq>=avgFreq*1.2?"🔥熱號":freq<=avgFreq*0.8?"❄️冷號":"⚖️中性";
+
+    return { n, iv, tr, st, freq, total, avgFreq, z, gapState, gapColor, heatLabel, freqLabel };
+  }
+
+  const details = nums.map(numDetail).filter(Boolean);
+
+  // ── 5. 強配對命中 ──
+  const hitPairs = [];
+  if(db.topPairs && db.topPairs.length){
+    for(const pr of db.topPairs.slice(0,10)){
+      if(nums.indexOf(pr.a)>=0 && nums.indexOf(pr.b)>=0){
+        hitPairs.push(pr);
+      }
+    }
+  }
+
+  // ── 6. 策略模擬（哪個策略「方向相符」）──
+  // 用各策略的特徵判斷中獎號碼落在哪裡
+  function stratFit(stratId, numsArr){
+    const total=db.total, pick=cfg.pick, range=cfg.mainRange;
+    const avgFreq=total*pick/range;
+    const topN=Math.ceil(range*0.3);
+    const botN=Math.ceil(range*0.3);
+
+    const allNums=db.allNums||Array.from({length:range},(_,i)=>i+1);
+    const byFreq=allNums.slice().sort((a,b)=>(db.freq[b]||0)-(db.freq[a]||0));
+
+    const hotPool  = new Set(byFreq.slice(0,topN));
+    const coldPool = new Set(byFreq.slice(-botN));
+    const risePool = new Set(allNums.filter(n=>{
+      const tr=db.trend[n]||{rAll:0,r20:0};
+      return tr.rAll>0 && (tr.r20/tr.rAll)>(1.15);
+    }));
+
+    let hits=0;
+    switch(stratId){
+      case "hot":  numsArr.forEach(n=>{ if(hotPool.has(n)) hits++; }); break;
+      case "cold": numsArr.forEach(n=>{ if(coldPool.has(n)) hits++; }); break;
+      case "bal":  numsArr.forEach(n=>{ if(hotPool.has(n)||coldPool.has(n)) hits++; }); break;
+      case "rise": numsArr.forEach(n=>{ if(risePool.has(n)) hits++; }); break;
+      case "ai":
+        // AI = 高頻率 + 高共現；算出這組共現分
+        hits = Math.round((co||0)/100*pick);
+        break;
+      case "rnd":  hits = Math.round(pick * pick / range * 2); break; // 期望值
+    }
+    return Math.min(hits, pick);
+  }
+
+  const stratResults = STRATS.map(s=>({
+    ...s,
+    hits: stratFit(s.id, nums)
+  })).sort((a,b)=>b.hits-a.hits);
+
+  // ══ 組合輸出 HTML ══════════════════════════════════════
+
+  let html = ``;
+
+  // 號碼球
+  html += `<div class="vcard" style="border-top:3px solid ${color}">
+    <div class="vcard-title">分析號碼</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      ${ballsHtml}${secondHtml}
+    </div>`;
+
+  // 規律指數橫幅
+  if(pRat && pScore!==null){
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:8px;background:${pRat.bg};border-left:4px solid ${pRat.color}">
+      <div>
+        <div style="font-size:13px;font-weight:700;color:${pRat.color}">📊 歷史規律指數 ${pScore.toFixed(1)} — ${pRat.label}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">${pRat.detail}　|　共現強度 ${co}/100</div>
+      </div>
+    </div>`;
+  }
+  html += `</div>`;
+
+  // 每個號碼的規律分析
+  if(details.length){
+    html += `<div class="vcard">
+      <div class="vcard-title">每個號碼的當期規律</div>`;
+
+    details.forEach(d=>{
+      const numPScore = calcNumScore(d.n, db);
+      html += `
+      <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f0efed;flex-wrap:wrap">
+        <span class="ball" style="background:${color};width:32px;height:32px;font-size:13px;flex-shrink:0">${String(d.n).padStart(2,'0')}</span>
+        <div style="min-width:80px">
+          <div style="font-size:11px;font-weight:600;color:${d.gapColor}">${d.gapState}</div>
+          <div style="font-size:10px;color:#aaa">距今 ${d.iv.lastGap} 期 / 平均間隔 ${d.iv.avg}</div>
+        </div>
+        <div style="min-width:70px">
+          <div style="font-size:11px;font-weight:600;color:#5F5E5A">${d.heatLabel}</div>
+          <div style="font-size:10px;color:#aaa">近20期 ${d.tr.r20}% / 全期 ${d.tr.rAll}%</div>
+        </div>
+        <div style="min-width:60px">
+          <div style="font-size:11px;color:#888">${d.freqLabel}</div>
+          <div style="font-size:10px;color:#aaa">出現 ${d.freq} 次</div>
+        </div>
+        <div style="margin-left:auto;text-align:right">
+          <div style="font-size:12px;font-weight:700;color:${color}">單號分 ${numPScore.toFixed(1)}</div>
+          <div style="font-size:10px;color:#aaa">${d.st.curType==='hit'?'連中'+d.st.curStreak+'期':'連缺'+d.st.curStreak+'期'}</div>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // 強配對命中
+  html += `<div class="vcard">
+    <div class="vcard-title">強配對命中</div>`;
+  if(hitPairs.length){
+    html += `<div style="font-size:12px;color:#3B6D11;margin-bottom:6px">✅ 命中 ${hitPairs.length} 組歷史強配對</div>`;
+    hitPairs.forEach(pr=>{
+      html += `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:12px">
+        <span class="ball" style="background:${color};width:26px;height:26px;font-size:11px">${String(pr.a).padStart(2,'0')}</span>
+        <span style="color:#aaa">×</span>
+        <span class="ball" style="background:${color};width:26px;height:26px;font-size:11px">${String(pr.b).padStart(2,'0')}</span>
+        <span style="color:#888">同期出現 ${pr.count} 次</span>
+        <span class="badge" style="background:#EAF3DE;color:#3B6D11">Top ${db.topPairs.indexOf(pr)+1}</span>
+      </div>`;
+    });
+  } else {
+    html += `<div style="font-size:12px;color:#aaa">這組號碼沒有命中前10大強配對</div>`;
+  }
+  html += `</div>`;
+
+  // 策略方向吻合度
+  html += `<div class="vcard">
+    <div class="vcard-title">各策略方向吻合度</div>
+    <div style="font-size:10px;color:#aaa;margin-bottom:8px">若用某策略，這組中獎號碼有幾個落在該策略的候選池？</div>`;
+
+  stratResults.forEach(s=>{
+    const pct = Math.round(s.hits / cfg.pick * 100);
+    const barColor = pct>=80?color:pct>=50?"#BA7517":"#ccc";
+    html += `<div class="strat-match-row">
+      <span style="min-width:90px">${s.label}</span>
+      <div style="flex:1;margin:0 8px">
+        <div style="height:6px;background:#e0dedd;border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width .4s"></div>
+        </div>
+      </div>
+      <span style="font-size:12px;font-weight:700;color:${barColor};min-width:40px;text-align:right">${s.hits}/${cfg.pick} 顆</span>
+    </div>`;
+  });
+  html += `</div>`;
+
+  // 免責聲明
+  html += `<div style="font-size:10px;color:#bbb;text-align:center;padding:8px 0">
+    ⚠️ 以上分析為歷史統計規律回顧，與未來中獎機率完全無關。彩券為真隨機事件。
+  </div>`;
+
+  result.innerHTML = html;
+
+  // 自動存入 Google Sheets
+  saveVerifyToGS(nums, verifySecond, verifySpecial, pScore, pPct, pRat, co, stratResults);
+}
+
+// ══════════════════════════════════════════════════════
+// Google Sheets 存檔功能
+// ══════════════════════════════════════════════════════
+
+// ── 儲存開獎驗證紀錄 ────────────────────────────────────
+async function saveVerifyToGS(nums, second, special, pScore, pPct, pRat, co, stratResults){
+  const now = new Date().toLocaleString("zh-TW", {
+    year:"numeric", month:"2-digit", day:"2-digit",
+    hour:"2-digit", minute:"2-digit", hour12:false
+  });
+
+  const stratMap = {};
+  (stratResults||[]).forEach(s=>{ stratMap["strat_"+s.id] = s.hits; });
+
+  const data = {
+    time:      now,
+    game:      currentGame,
+    nums:      nums.join(","),
+    second:    second!==null ? second : "",
+    special:   special!==null ? special : "",
+    pScore:    pScore!==null ? pScore.toFixed(1) : "",
+    pPct:      pPct!==null ? pPct : "",
+    pRatLabel: pRat ? pRat.label : "",
+    co:        co!==null ? co : "",
+    ...stratMap
+  };
+
+  const r = await gsPost("save_verify", data);
+
+  // 在頁面底部顯示存檔狀態
+  const result = document.getElementById("verify-result");
+  if(result){
+    const old = result.querySelector(".gs-save-status");
+    if(old) old.remove();
+    const el = document.createElement("div");
+    el.className = "gs-save-status";
+    el.style.cssText = "font-size:11px;color:#888;text-align:right;padding:4px 0 8px;";
+    el.textContent = r.ok ? "✅ 已存入 Google Sheets" : "⚠️ 存檔失敗（離線模式）";
+    result.appendChild(el);
+  }
+}
+
+// ── 儲存選號產生紀錄 ────────────────────────────────────
+async function saveGenToGS(rec){
+  const now = new Date().toLocaleString("zh-TW", {
+    year:"numeric", month:"2-digit", day:"2-digit",
+    hour:"2-digit", minute:"2-digit", hour12:false
+  });
+
+  const data = {
+    time:      now,
+    game:      currentGame,
+    strat:     rec.strat ? rec.strat.label : "",
+    nums:      rec.nums.join(","),
+    second:    rec.second!==null ? rec.second : "",
+    pScore:    rec.pScore!==null ? rec.pScore.toFixed(1) : "",
+    pPct:      rec.pPct!==null ? rec.pPct : "",
+    pRatLabel: rec.pRat ? rec.pRat.label : "",
+    co:        rec.co!==null ? rec.co : ""
+  };
+
+  await gsPost("save_gen", data);
+}
+
+// ── 讀取歷史紀錄並顯示 ──────────────────────────────────
+async function loadGSHistory(sheet){
+  const cont = document.getElementById("gs-history-cont");
+  if(!cont) return;
+  cont.innerHTML = "<div style='color:#aaa;font-size:12px;padding:8px 0'>載入中...</div>";
+
+  const res = await gsGet(sheet, 50);
+  if(!res.ok || !res.rows || !res.rows.length){
+    cont.innerHTML = "<div style='color:#aaa;font-size:12px;padding:8px 0'>尚無紀錄</div>";
+    return;
+  }
+
+  const color = gc(currentGame);
+  const isVerify = sheet === "verify_log";
+
+  cont.innerHTML = res.rows.map(row => {
+    const nums = (row["主區號碼"]||"").split(",").filter(Boolean);
+    const ballsHtml = nums.map(n =>
+      `<span style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;margin-right:2px">${String(n).padStart(2,'0')}</span>`
+    ).join("");
+
+    const second  = row["第二區"]  ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#378ADD;color:#fff;font-size:10px;font-weight:700;margin-left:4px">${row["第二區"]}</span>` : "";
+    const special = row["特別號"] ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#3B6D11;color:#fff;font-size:10px;font-weight:700;margin-left:4px">${row["特別號"]}</span>` : "";
+
+    const pScore = row["規律指數"] !== "" ? `<span style="font-size:11px;color:#888">規律 ${row["規律指數"]}</span>` : "";
+    const pRat   = row["規律等級"] ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${row["規律等級"]}</span>` : "";
+    const co     = row["共現強度"] !== "" ? `<span style="font-size:11px;color:#888">共現 ${row["共現強度"]}/100</span>` : "";
+    const strat  = row["策略"] ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${row["策略"]}</span>` : "";
+
+    return `<div style="background:#fff;border-radius:8px;border:1px solid #e8e7e4;padding:10px 12px;margin-bottom:6px">
+      <div style="font-size:10px;color:#aaa;margin-bottom:5px">${row["時間"]||""} ${row["彩種"]||""}</div>
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:3px;margin-bottom:5px">
+        ${ballsHtml}${second}${special}
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+        ${strat}${pScore}${pRat}${co}
+      </div>
+    </div>`;
+  }).join("");
+}
