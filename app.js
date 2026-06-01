@@ -31,6 +31,25 @@ async function gsGet(sheet, limit=100){
   }
 }
 
+// ── 時間格式化（支援 ISO / zh-TW 各種格式）──────────────
+function fmtTime(raw){
+  if(!raw) return "";
+  const s = String(raw);
+  // ISO 格式 2026-06-01T15:44:00.000Z → 加8小時轉台灣時間
+  if(s.includes("T") && s.includes("Z")){
+    try{
+      const d = new Date(s);
+      return d.toLocaleString("zh-TW",{
+        timeZone:"Asia/Taipei",
+        year:"numeric",month:"2-digit",day:"2-digit",
+        hour:"2-digit",minute:"2-digit",hour12:false
+      }).replace(/\//g,"/");
+    } catch(e){ return s; }
+  }
+  // 已經是正常格式就直接回傳
+  return s;
+}
+
 
 // ── 快取設定 ───────────────────────────────────────────
 const CACHE_KEY     = "lottery_csv_cache";
@@ -408,7 +427,10 @@ function analyzeCSVs(game,csvList){
   return{total,mainRange:cfg.mainRange,pick:cfg.pick,secondRange:cfg.secondRange||0,
     isDigit:cfg.isDigit||false,color:cfg.color,desc:cfg.desc,
     freq,recentFreq,secondFreq,pairFreq,topPairs:topPairs.slice(0,20),
-    intervals,streaks,trend,pairChanges,allNums};
+    intervals,streaks,trend,pairChanges,allNums,
+    draws,  // 回測用：每期號碼陣列
+    rows    // 自動抓最新期用：含期別欄位
+  };
 }
 
 // ── 歷史規律指數 ───────────────────────────────────────
@@ -490,7 +512,7 @@ function switchGame(g){
   document.getElementById("game-desc").textContent=DB[g].desc||"";
   document.getElementById("gen-btn").style.background=gc(g);
   renderCards();renderStrats();renderCountBtns();renderFreq();renderPairs();
-  renderPattern(patternFilter);renderPairChange();renderFullOdds();renderVerify();
+  renderPattern(patternFilter);renderPairChange();renderFullOdds();renderVerify();renderTrend();
   clearResult();renderHistory();
 }
 
@@ -772,6 +794,83 @@ function clearResult(){
 
 function sample(arr,k){const a=arr.slice(),r=[];for(let i=0;i<k&&a.length;i++){const idx=Math.floor(Math.random()*a.length);r.push(a.splice(idx,1)[0]);}return r;}
 function weightedSample(all,w,k){const pool=all.slice(),res=[];for(let i=0;i<k&&pool.length;i++){const tot=pool.reduce((s,x)=>s+(w[x]||0.01),0);let r=Math.random()*tot;for(let j=0;j<pool.length;j++){r-=w[pool[j]]||0.01;if(r<=0){res.push(pool.splice(j,1)[0]);break;}}}return res;}
+// ── AI 5維評分核心 ──────────────────────────────────────
+// 維度：① 全期頻率  ② 近期熱度(近20期)  ③ 間隔超期程度
+//        ④ 共現強度  ⑤ 近期竄升趨勢
+// 各維度 0~1 正規化後加權合併
+function calcAIScore(n, freq, total, draws, pf, pmx, range, pick){
+  const allNums = range<=10
+    ? Array.from({length:range},(_,i)=>i)
+    : Array.from({length:range},(_,i)=>i+1);
+
+  const avgFreq = total * pick / range;
+
+  // ① 全期頻率（正規化）
+  const maxFreq = Math.max(1, ...allNums.map(x=>freq[x]||0));
+  const s_freq  = (freq[n]||0) / maxFreq;
+
+  // ② 近期熱度（近20期出現率 vs 全期平均）
+  const w20   = draws.slice(-20);
+  const r20   = w20.length ? w20.filter(d=>d.indexOf(n)>=0).length/w20.length : 0;
+  const rAll  = total>0 ? (freq[n]||0)/total : 0;
+  const heat  = rAll>0 ? Math.min(2, r20/rAll) / 2 : 0.5; // 0~1，1=近期出現率是平均2倍
+
+  // ③ 間隔超期（z-score 轉 0~1，超期越多分越高）
+  let s_gap = 0.5;
+  const idxs = [];
+  draws.forEach((d,i)=>{ if(d.indexOf(n)>=0) idxs.push(i); });
+  if(idxs.length>=2){
+    const gaps = idxs.slice(1).map((v,i)=>v-idxs[i]);
+    const avg  = gaps.reduce((s,x)=>s+x,0)/gaps.length;
+    const std  = Math.sqrt(gaps.map(g=>(g-avg)**2).reduce((s,x)=>s+x,0)/gaps.length)||1;
+    const lastGap = total-1-idxs[idxs.length-1];
+    const z = (lastGap-avg)/std;
+    s_gap = Math.min(1, Math.max(0, 0.5 + z*0.2)); // z=2.5時達到1
+  } else if(idxs.length===0){
+    s_gap = 1.0; // 從未出現，超期最高分
+  }
+
+  // ④ 共現強度（此號與所有其他號的平均共現率）
+  let coSum = 0;
+  allNums.forEach(m=>{
+    if(m===n) return;
+    const k = Math.min(n,m)+","+Math.max(n,m);
+    coSum += (pf[k]||0)/pmx;
+  });
+  const s_co = allNums.length>1 ? coSum/(allNums.length-1) : 0;
+
+  // ⑤ 竄升趨勢（近50期 vs 全期）
+  const w50  = draws.slice(-50);
+  const r50  = w50.length ? w50.filter(d=>d.indexOf(n)>=0).length/w50.length : 0;
+  const rise = rAll>0 ? Math.min(1, Math.max(0, (r50-rAll)/rAll*0.5+0.5)) : 0.5;
+
+  // 加權合併：頻率20% + 熱度25% + 超期20% + 共現20% + 竄升15%
+  return s_freq*0.20 + heat*0.25 + s_gap*0.20 + s_co*0.20 + rise*0.15;
+}
+
+// 建立 AI 候選池（取加權前 pick*2 個號碼）
+function buildAIPool(allNums, freq, total, draws, pf, pmx, pick, range){
+  const scores = {};
+  allNums.forEach(n=>{
+    scores[n] = calcAIScore(n, freq, total, draws, pf, pmx, range, pick);
+  });
+  const sorted = allNums.slice().sort((a,b)=>scores[b]-scores[a]);
+  return new Set(sorted.slice(0, pick*2));
+}
+
+// AI 加權隨機抽選（用 score 做加權，不是直接取 top）
+function aiWeightedPick(db, all, k){
+  const draws = db.draws||[];
+  const pf    = db.pairFreq||{};
+  const pmx   = Math.max(1,...Object.values(pf).map(Number).concat([1]));
+  const w = {};
+  all.forEach(n=>{
+    w[n] = Math.max(0.001, calcAIScore(
+      n, db.freq, db.total, draws, pf, pmx, db.mainRange, k
+    ));
+  });
+  return weightedSample(all, w, k);
+}
 
 function pickNums(){
   const db=DB[currentGame],k=db.pick,isDigit=db.isDigit;
@@ -800,9 +899,7 @@ function pickNums(){
     nums=rising.length>=k?sample(rising.slice(0,k*2),k):rising.concat(sample(all.filter(x=>rising.indexOf(x)<0),k-rising.length));
   }
   else if(currentStrat==="ai"){
-    const pm=db.pairFreq||{},pmx=Math.max.apply(null,Object.values(pm).map(Number).concat([1])),w={};
-    all.forEach(n=>{const fs=(freq[n]||0)/avgA,ps=all.reduce((acc,m)=>{if(m===n)return acc;const kk=Math.min(n,m)+","+Math.max(n,m);return acc+(pm[kk]||0)/pmx;},0);w[n]=fs*0.5+ps*0.02+0.01;});
-    nums=weightedSample(all,w,k);
+    nums = aiWeightedPick(db, all, k);
   }
   else nums=sample(all,k);
   const uniq=[];nums.forEach(x=>{if(uniq.indexOf(x)<0)uniq.push(x);});nums=uniq.sort((a,b)=>a-b);
@@ -1060,6 +1157,8 @@ function renderVerify(){
       />
       <button onclick="parseVerifyPaste()"
         style="padding:9px 16px;background:${color};color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap">解析</button>
+      <button onclick="autoFillLatestDraw()"
+        style="padding:9px 14px;background:#EDECEA;color:#5F5E5A;border:none;border-radius:8px;font-size:12px;font-family:inherit;cursor:pointer;white-space:nowrap;flex-shrink:0">📅 最新期</button>
     </div>
     <div id="verify-paste-hint" style="font-size:11px;color:#aaa;margin-top:-10px;margin-bottom:10px"></div>
     <div class="vcard-title">或手動點選主區號碼（${pick} 個）</div>
@@ -1410,10 +1509,17 @@ function analyzeVerify(){
       case "cold": numsArr.forEach(n=>{ if(coldPool.has(n)) hits++; }); break;
       case "bal":  numsArr.forEach(n=>{ if(hotPool.has(n)||coldPool.has(n)) hits++; }); break;
       case "rise": numsArr.forEach(n=>{ if(risePool.has(n)) hits++; }); break;
-      case "ai":
-        // AI = 高頻率 + 高共現；算出這組共現分
-        hits = Math.round((co||0)/100*pick);
+      case "ai":{
+        // 真正用AI候選池比對
+        const _all2 = db.allNums||Array.from({length:db.mainRange},(_,i)=>i+1);
+        const _aiPool = buildAIPool(
+          _all2, db.freq, db.total, db.draws||[],
+          db.pairFreq||{}, Math.max(1,...Object.values(db.pairFreq||{}).map(Number)),
+          pick, db.mainRange
+        );
+        hits = numsArr.filter(n=>_aiPool.has(n)).length;
         break;
+      }
       case "rnd":  hits = Math.round(pick * pick / range * 2); break; // 期望值
     }
     return Math.min(hits, pick);
@@ -1621,7 +1727,7 @@ async function loadGSHistory(sheet){
     const strat  = row["策略"] ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${row["策略"]}</span>` : "";
 
     return `<div style="background:#fff;border-radius:8px;border:1px solid #e8e7e4;padding:10px 12px;margin-bottom:6px">
-      <div style="font-size:10px;color:#aaa;margin-bottom:5px">${row["時間"]||""} ${row["彩種"]||""}</div>
+      <div style="font-size:10px;color:#aaa;margin-bottom:5px">${fmtTime(row["時間"])} ${row["彩種"]||""}</div>
       <div style="display:flex;align-items:center;flex-wrap:wrap;gap:3px;margin-bottom:5px">
         ${ballsHtml}${second}${special}
       </div>
@@ -1631,3 +1737,389 @@ async function loadGSHistory(sheet){
     </div>`;
   }).join("");
 }
+
+// ═══════════════════════════════════════════════════════════
+// ① 自動抓最新開獎 — 從 GitHub CSV 取最後一期
+// ═══════════════════════════════════════════════════════════
+
+async function autoFillLatestDraw(){
+  const db  = DB[currentGame];
+  const btn = document.getElementById("auto-fill-btn");
+  if(!db){ alert("請先載入資料"); return; }
+
+  if(btn){ btn.disabled=true; btn.textContent="抓取中..."; }
+
+  try{
+    // 從已載入的 rows 取最後一期（已按期別排序）
+    const rows = db.rows;
+    if(!rows || !rows.length) throw new Error("找不到開獎資料");
+
+    const lastRow = rows[rows.length - 1];
+    const cfg     = GAME_CFG[currentGame];
+
+    // 解析主區
+    const nums = cfg.cols.map(c => parseInt(lastRow[c])||0).filter(n=>n>0);
+
+    // 第二區
+    let second  = null;
+    let special = null;
+    if(cfg.secondCol)  second  = parseInt(lastRow[cfg.secondCol])  || null;
+    if(cfg.specialCol) special = parseInt(lastRow[cfg.specialCol]) || null;
+
+    const period = lastRow["期別"] || "";
+
+    // 填入貼上欄位
+    const input = document.getElementById("verify-paste-input");
+    if(input){
+      let txt = nums.map(n=>String(n).padStart(2,"0")).join("、");
+      if(second!==null)  txt += "，第二區 " + second;
+      if(special!==null) txt += "，特別號 " + special;
+      input.value = txt;
+
+      // 顯示期別
+      const hint = document.getElementById("verify-paste-hint");
+      if(hint){ hint.textContent = "📅 " + period + " 期　← 按「解析」填入"; hint.style.color="#3B6D11"; }
+    }
+
+    if(btn){ btn.disabled=false; btn.textContent="📅 自動填入最新期"; }
+
+  } catch(e){
+    if(btn){ btn.disabled=false; btn.textContent="📅 自動填入最新期"; }
+    alert("抓取失敗：" + e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// ② 回測引擎
+// ═══════════════════════════════════════════════════════════
+
+// 回測單一期（用該期之前的資料建暫時 DB）
+function backtestOnePeriod(game, draws, periodIdx){
+  if(periodIdx < 50) return null; // 資料太少不回測
+  const cfg  = GAME_CFG[game];
+  const past = draws.slice(0, periodIdx); // 不含當期
+  const actual = draws[periodIdx];
+
+  // 用過去資料快速算出所需統計
+  const range   = cfg.mainRange;
+  const pick    = cfg.pick;
+  const allNums = cfg.isDigit
+    ? Array.from({length:range},(_,i)=>i)
+    : Array.from({length:range},(_,i)=>i+1);
+
+  const freq = {};
+  allNums.forEach(n=>{ freq[n]=0; });
+  past.forEach(nums=>nums.forEach(n=>{ freq[n]=(freq[n]||0)+1; }));
+
+  const total  = past.length;
+  const w20    = past.slice(-20);
+  const w50    = past.slice(-50);
+  const fRate  = (arr,n)=>arr.length?arr.filter(nums=>nums.indexOf(n)>=0).length/arr.length:0;
+  const rAllMap={}, r20Map={}, r50Map={};
+  allNums.forEach(n=>{
+    rAllMap[n]=fRate(past,n);
+    r20Map[n] =fRate(w20,n);
+    r50Map[n] =fRate(w50,n);
+  });
+
+  const topN = Math.ceil(range*0.3);
+  const botN = Math.ceil(range*0.3);
+  const byFreq = allNums.slice().sort((a,b)=>(freq[b]||0)-(freq[a]||0));
+  const hotPool  = new Set(byFreq.slice(0,topN));
+  const coldPool = new Set(byFreq.slice(-botN));
+  const risePool = new Set(allNums.filter(n=>{
+    const rAll=rAllMap[n], r20=r20Map[n];
+    return rAll>0 && (r20/rAll)>1.15;
+  }));
+
+  // 配對頻率（用於 AI）
+  const pf={};
+  past.forEach(nums=>{
+    const s=nums.slice().sort((a,b)=>a-b);
+    for(let i=0;i<s.length;i++)for(let j=i+1;j<s.length;j++){
+      const k=s[i]+","+s[j]; pf[k]=(pf[k]||0)+1;
+    }
+  });
+  const pmx=Math.max(1,...Object.values(pf));
+
+  // 計算每個候選號碼的 AI 權重
+  const aiWeight={};
+  allNums.forEach(n=>{
+    aiWeight[n] = (freq[n]||0)/Math.max(1,...Object.values(freq));
+  });
+
+  function countHits(pool){
+    return actual.filter(n=>pool.has(n)).length;
+  }
+
+  // 竄升派：近50期出現率 > 全期平均 × 1.15
+  const hotHits  = countHits(hotPool);
+  const coldHits = countHits(coldPool);
+  const balHits  = actual.filter(n=>hotPool.has(n)||coldPool.has(n)).length;
+  const riseHits = countHits(risePool);
+
+  // AI加權：用完整5維評分，取前 pick*2 候選池
+  const aiPool = buildAIPool(allNums, freq, total, past, pf, pmx, pick, range);
+  const aiHits = countHits(aiPool);
+
+  // 隨機期望值
+  const rndExp = Math.round(pick*pick/range*10)/10;
+
+  return { hot:hotHits, cold:coldHits, bal:balHits, rise:riseHits, ai:aiHits, rnd:rndExp };
+}
+
+// 執行完整回測
+async function runBacktest(){
+  const db  = DB[currentGame];
+  const btn = document.getElementById("backtest-run-btn");
+  const prog= document.getElementById("backtest-progress");
+  const res = document.getElementById("backtest-result");
+  if(!db || db.isDigit){ alert("數字型彩券不支援回測"); return; }
+  if(!db.draws || db.draws.length < 100){ alert("資料不足，需要至少100期"); return; }
+
+  if(btn){ btn.disabled=true; btn.textContent="回測中..."; }
+  if(prog){ prog.style.display="block"; }
+  if(res){ res.innerHTML=""; }
+
+  const draws = db.draws;
+  const total = draws.length;
+  // 最多回測最近 500 期，每隔 1 期
+  const startIdx = Math.max(50, total-500);
+  const endIdx   = total-1;
+  const count    = endIdx - startIdx;
+
+  const sums = {hot:0,cold:0,bal:0,rise:0,ai:0,rnd:0};
+  const cnt  = {hot:0,cold:0,bal:0,rise:0,ai:0,rnd:0};
+
+  // 分批跑，避免 UI 凍結
+  const BATCH = 20;
+  for(let i=startIdx; i<endIdx; i+=BATCH){
+    const end = Math.min(i+BATCH, endIdx);
+    for(let j=i; j<end; j++){
+      const r = backtestOnePeriod(currentGame, draws, j);
+      if(!r) continue;
+      for(const k of Object.keys(sums)){
+        sums[k]+=r[k]; cnt[k]++;
+      }
+    }
+    // 進度
+    const pct = Math.round((i-startIdx)/count*100);
+    if(prog) prog.querySelector(".bt-bar").style.width = pct+"%";
+    if(prog) prog.querySelector(".bt-pct").textContent = pct+"%";
+    await new Promise(r=>setTimeout(r,0)); // yield to browser
+  }
+
+  if(prog) prog.style.display="none";
+  if(btn){ btn.disabled=false; btn.textContent="▶ 執行回測"; }
+
+  // 算平均
+  const avgs={};
+  for(const k of Object.keys(sums)) avgs[k]=cnt[k]?Math.round(sums[k]/cnt[k]*100)/100:0;
+  const pick = db.pick;
+
+  // 存到 Sheets
+  const now = new Date().toLocaleString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
+  gsPost("save_backtest", {
+    time:now, game:currentGame, periods:count,
+    hot:avgs.hot, cold:avgs.cold, bal:avgs.bal,
+    rise:avgs.rise, ai:avgs.ai, rnd:avgs.rnd, pick
+  });
+
+  // 存到本地快取供圖表用
+  if(!btCache) btCache={};
+  btCache[currentGame]={avgs,pick,count,ts:Date.now()};
+
+  renderBacktestResult(avgs, pick, count);
+}
+
+let btCache = {};
+
+function renderBacktestResult(avgs, pick, count){
+  const res = document.getElementById("backtest-result");
+  if(!res) return;
+  const color = gc(currentGame);
+
+  const stratOrder = [
+    {id:"bal", label:"⚖️ 平衡派"},
+    {id:"ai",  label:"🤖 AI加權派"},
+    {id:"hot", label:"🔥 熱號派"},
+    {id:"rise",label:"📈 竄升派"},
+    {id:"rnd", label:"🎲 隨機派"},
+    {id:"cold",label:"❄️ 冷號派"}
+  ].sort((a,b)=>avgs[b.id]-avgs[a.id]);
+
+  const max = Math.max(...stratOrder.map(s=>avgs[s.id]), 0.01);
+
+  let html = `<div class="vcard" style="border-top:3px solid ${color}">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="vcard-title" style="margin:0">回測結果（近 ${count} 期平均命中）</div>
+      <div style="font-size:10px;color:#aaa">每期選 ${pick} 個號碼</div>
+    </div>`;
+
+  stratOrder.forEach((s,i)=>{
+    const avg  = avgs[s.id];
+    const pct  = Math.round(avg/pick*100);
+    const barW = Math.round(avg/max*100);
+    const barColor = i===0?color:i===1?"#BA7517":"#ccc";
+    const medal = i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f0efed">
+      <span style="min-width:90px;font-size:12px">${medal}${s.label}</span>
+      <div style="flex:1;height:8px;background:#e0dedd;border-radius:4px;overflow:hidden">
+        <div style="height:100%;width:${barW}%;background:${barColor};border-radius:4px;transition:width .5s"></div>
+      </div>
+      <span style="font-size:13px;font-weight:700;color:${barColor};min-width:60px;text-align:right">
+        ${avg}/${pick} 顆
+      </span>
+      <span style="font-size:10px;color:#aaa;min-width:36px">命中率 ${pct}%</span>
+    </div>`;
+  });
+
+  html += `<div style="font-size:10px;color:#aaa;margin-top:8px;text-align:center">
+    ⚠️ 回測為歷史統計，不代表未來表現。彩券為真隨機事件。
+  </div></div>`;
+
+  res.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════
+// ③ 歷史趨勢分頁
+// ═══════════════════════════════════════════════════════════
+
+function renderTrend(){
+  const cont = document.getElementById("trend-content");
+  if(!cont) return;
+  const db    = DB[currentGame];
+  const color = gc(currentGame);
+
+  if(!db){
+    cont.innerHTML = "<div style='color:#aaa;font-size:13px;padding:20px 0;text-align:center'>請先載入彩券資料</div>";
+    return;
+  }
+
+  let html = `
+  <div style="margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700;color:${color};margin-bottom:3px">📈 歷史趨勢分析</div>
+    <div style="font-size:11px;color:#888">策略回測 + 雲端紀錄視覺化</div>
+  </div>
+
+  <!-- 回測區塊 -->
+  <div class="vcard">
+    <div class="vcard-title">策略回測（歷史命中率）</div>
+    <div style="font-size:11px;color:#888;margin-bottom:10px">
+      用過去每一期開獎前的資料，模擬各策略的候選池，統計實際中獎號碼有幾顆落在裡面
+    </div>
+    <div id="backtest-progress" style="display:none;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="font-size:11px;color:#888">回測進度</span>
+        <span class="bt-pct" style="font-size:11px;font-weight:700;color:${color}">0%</span>
+      </div>
+      <div style="height:6px;background:#e0dedd;border-radius:3px;overflow:hidden">
+        <div class="bt-bar" style="height:100%;width:0%;background:${color};border-radius:3px;transition:width .2s"></div>
+      </div>
+    </div>
+    <button id="backtest-run-btn" onclick="runBacktest()"
+      style="padding:10px 24px;background:${color};color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;font-family:inherit;cursor:pointer">
+      ▶ 執行回測
+    </button>
+    <div id="backtest-result" style="margin-top:12px"></div>
+  </div>
+
+  <!-- Sheets 開獎驗證歷史 -->
+  <div class="vcard" style="margin-top:8px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="vcard-title" style="margin:0">☁️ 雲端開獎驗證紀錄</div>
+      <button onclick="loadTrendHistory()"
+        style="font-size:11px;padding:4px 12px;border:1px solid #ddd;border-radius:5px;background:none;cursor:pointer;color:#888">
+        載入
+      </button>
+    </div>
+    <div id="trend-history-cont" style="font-size:12px;color:#aaa">按「載入」讀取 Google Sheets 紀錄</div>
+  </div>`;
+
+  cont.innerHTML = html;
+
+  // 如果有快取的回測結果，直接顯示
+  if(btCache[currentGame]){
+    const c = btCache[currentGame];
+    renderBacktestResult(c.avgs, c.pick, c.count);
+  }
+}
+
+async function loadTrendHistory(){
+  const cont  = document.getElementById("trend-history-cont");
+  if(!cont) return;
+  cont.innerHTML = "<div style='color:#aaa;font-size:12px;padding:8px 0'>載入中...</div>";
+
+  const res = await gsGet("verify_log", 100);
+  if(!res.ok || !res.rows || !res.rows.length){
+    cont.innerHTML = "<div style='color:#aaa;font-size:12px;padding:8px 0'>尚無雲端紀錄</div>";
+    return;
+  }
+
+  // 只顯示目前彩種
+  const rows = res.rows.filter(r=>r["彩種"]===currentGame);
+  if(!rows.length){
+    cont.innerHTML = "<div style='color:#aaa;font-size:12px;padding:8px 0'>目前彩種尚無紀錄</div>";
+    return;
+  }
+
+  const color = gc(currentGame);
+  const pick  = DB[currentGame].pick;
+
+  // 簡易折線圖：規律指數 + 策略命中
+  const labels   = rows.map((_,i)=>"#"+(rows.length-i));
+  const pScores  = rows.map(r=>parseFloat(r["規律指數(0-100)"])||0);
+  const balHits  = rows.map(r=>parseInt(r["平衡派命中"])||0);
+  const aiHits   = rows.map(r=>parseInt(r["AI加權派命中"])||0);
+
+  // SVG 折線圖
+  const W=680, H=140, PAD=36;
+  const n=rows.length;
+  function toX(i){ return PAD + (W-PAD*2)/(Math.max(n-1,1)) * i; }
+  function toY(v,mn,mx){ return H-PAD - (H-PAD*2)*((v-mn)/Math.max(mx-mn,1)); }
+
+  function polyline(vals, mn, mx, clr, dash=""){
+    const pts=vals.map((v,i)=>toX(i)+","+toY(v,mn,mx)).join(" ");
+    return `<polyline points="${pts}" fill="none" stroke="${clr}" stroke-width="2" stroke-dasharray="${dash}" stroke-linejoin="round"/>`;
+  }
+  function dots(vals, mn, mx, clr){
+    return vals.map((v,i)=>`<circle cx="${toX(i)}" cy="${toY(v,mn,mx)}" r="3" fill="${clr}"/>`).join("");
+  }
+
+  const allV = [...pScores];
+  const mn=0, mx=100;
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:680px;display:block;margin-bottom:8px">
+    <!-- 背景格線 -->
+    ${[0,25,50,75,100].map(v=>`
+      <line x1="${PAD}" y1="${toY(v,mn,mx)}" x2="${W-PAD}" y2="${toY(v,mn,mx)}" stroke="#e8e7e4" stroke-width="1"/>
+      <text x="${PAD-4}" y="${toY(v,mn,mx)+4}" font-size="9" fill="#bbb" text-anchor="end">${v}</text>
+    `).join("")}
+    <!-- 規律指數 -->
+    ${polyline(pScores,mn,mx,color)}
+    ${dots(pScores,mn,mx,color)}
+    <!-- 圖例 -->
+    <line x1="${PAD}" y1="${H-10}" x2="${PAD+20}" y2="${H-10}" stroke="${color}" stroke-width="2"/>
+    <text x="${PAD+24}" y="${H-6}" font-size="10" fill="${color}">規律指數</text>
+  </svg>`;
+
+  // 表格
+  const tableRows = rows.map((r,i)=>{
+    const nums = (r["主區號碼"]||"").split(",").filter(Boolean);
+    const ballsHtml = nums.map(n=>`<span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:${color};color:#fff;font-size:10px;font-weight:700;margin-right:2px">${String(n).padStart(2,"0")}</span>`).join("");
+    const second = r["第二區"]&&r["第二區"]!=="—"?`<span style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#378ADD;color:#fff;font-size:10px;font-weight:700;margin-left:2px">${r["第二區"]}</span>`:"";
+    const balV = parseInt(r["平衡派命中"])||0;
+    const aiV  = parseInt(r["AI加權派命中"])||0;
+    const best = Math.max(balV,aiV,parseInt(r["熱號派命中"])||0);
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0efed;flex-wrap:wrap">
+      <span style="font-size:10px;color:#aaa;min-width:110px">${fmtTime(r["時間"])}</span>
+      <div style="display:flex;align-items:center;gap:2px">${ballsHtml}${second}</div>
+      <span style="font-size:11px;font-weight:700;color:${color};margin-left:auto">規律 ${r["規律指數(0-100)"]||""}</span>
+      <span style="font-size:11px;color:#888">最高命中 ${best}/${pick}</span>
+    </div>`;
+  }).join("");
+
+  cont.innerHTML = svg + tableRows;
+}
+
+// ═══════════════════════════════════════════════════════════
