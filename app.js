@@ -159,24 +159,48 @@ async function loadFromGitHub(forceRefresh){
     const res     = await fetch(apiUrl);
     if(!res.ok) throw new Error("GitHub API 回應 " + res.status);
     const files   = await res.json();
+
+    // ZIP 優先，沒有 ZIP 再找 CSV
+    const zipFiles = files.filter(f => f.name.toLowerCase().endsWith(".zip"));
     const csvFiles = files.filter(f => f.name.toLowerCase().endsWith(".csv"));
-    if(!csvFiles.length){
-      if(statusEl) statusEl.textContent = "⚠️ 找不到 CSV 檔案";
+
+    if(!zipFiles.length && !csvFiles.length){
+      if(statusEl) statusEl.textContent = "⚠️ 找不到 ZIP 或 CSV 檔案";
       if(btn){ btn.disabled = false; btn.textContent = "⚡ 重試"; }
       return;
     }
 
-    if(statusEl) statusEl.textContent = "找到 " + csvFiles.length + " 個 CSV，下載中...";
-
     const csvMap = {};
+
+    // ── 處理 ZIP ──
+    if(zipFiles.length){
+      if(statusEl) statusEl.textContent = "找到 " + zipFiles.length + " 個 ZIP，下載解壓中...";
+      for(const file of zipFiles){
+        if(statusEl) statusEl.textContent = "下載 " + file.name + "...";
+        const r    = await fetch(file.download_url);
+        const blob = await r.blob();
+        const zip  = await JSZip.loadAsync(blob);
+        for(const [name, entry] of Object.entries(zip.files)){
+          if(name.toLowerCase().endsWith(".csv") && !entry.dir){
+            const text = await entry.async("string");
+            const g    = detectGame(name);
+            if(!g) continue;
+            if(!csvMap[g]) csvMap[g] = [];
+            csvMap[g].push({name, content: text});
+          }
+        }
+      }
+    }
+
+    // ── 處理散 CSV（補充 ZIP 沒有的彩種）──
     for(const file of csvFiles){
       const g = detectGame(file.name);
-      if(!g) continue;
+      if(!g || csvMap[g]) continue; // ZIP 已有就跳過
       if(statusEl) statusEl.textContent = "下載 " + file.name + "...";
       const r       = await fetch(file.download_url);
-      const content = await r.text();
+      const text    = await r.text();
       if(!csvMap[g]) csvMap[g] = [];
-      csvMap[g].push({name: file.name, content});
+      csvMap[g].push({name: file.name, content: text});
     }
 
     // 存快取
