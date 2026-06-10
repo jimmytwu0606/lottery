@@ -167,6 +167,7 @@ body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
     <div style="font-size:13px;color:#888;margin-bottom:4px">jimmytwu0606 / lottery</div>
 
     <button id="github-load-btn" onclick="loadFromGitHub()">⚡ 自動載入最新資料</button>
+    <button id="sync-draws-btn" onclick="syncOfficialDraws()" style="background:#185FA5;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-size:13px;font-family:inherit;cursor:pointer;margin-left:8px">☁️ 同步官網開獎 → Sheet</button>
     <div id="load-status"></div>
 
     <div style="margin:20px 0;display:flex;align-items:center;gap:10px">
@@ -235,6 +236,10 @@ body.dragging #upload-zone{border-color:#D85A30;background:#FFF8F6}
         <div id="count-btn-wrap" style="display:flex;gap:6px">
           <button data-count="1"  onclick="setGenCount(1)"  style="padding:6px 18px;border:1.5px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;cursor:pointer;font-weight:600;background:transparent;color:#888">1 組</button>
           <button data-count="10" onclick="setGenCount(10)" style="padding:6px 18px;border:1.5px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;cursor:pointer;font-weight:600;background:transparent;color:#888">10 組</button>
+          <label style="display:flex;align-items:center;gap:5px;margin-left:8px;font-size:12px;color:#5F5E5A;cursor:pointer;user-select:none">
+            <input type="checkbox" onchange="setAvoidCrowd(this.checked)" style="accent-color:#3B6D11">
+            🛡️ 避開撞號<span style="color:#aaa;font-size:10px">（避開生日號/連號等大眾組合，提高中獎時的獨得率）</span>
+          </label>
         </div>
       </div>
       <button id="gen-btn" onclick="generate()">✨ 產生號碼</button>

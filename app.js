@@ -31,6 +31,78 @@ async function gsGet(sheet, limit=100){
   }
 }
 
+// ── 官網開獎資料同步（透過 Apps Script 後端撈官方 API）──
+// 按下按鈕 → GAS 去 api.taiwanlottery.com 撈最近 N 個月
+// → 比對 draws_<彩種> 工作表已有期別 → 只把「還沒存入的」補進去
+async function syncOfficialDraws(){
+  const btn = document.getElementById("sync-draws-btn");
+  const statusEl = document.getElementById("load-status");
+  if(btn){ btn.disabled = true; btn.textContent = "☁️ 同步中..."; }
+  if(statusEl) statusEl.textContent = "正在向官網撈取最新開獎資料...";
+
+  try{
+    const res = await fetch(GS_API + "?action=sync_draws&months=2");
+    const j   = await res.json();
+    if(!j.ok) throw new Error(j.error || "同步失敗");
+
+    const parts = (j.results||[]).map(r =>
+      r.ok ? `${r.game} +${r.added}（共${r.total}期）` : `${r.game} ❌`
+    );
+    const totalAdded = (j.results||[]).reduce((s,r)=>s+(r.added||0),0);
+    if(statusEl) statusEl.textContent =
+      totalAdded > 0
+        ? "✅ 已補存 " + totalAdded + " 期：" + parts.join("、")
+        : "✅ Sheet 已是最新，沒有缺漏期別";
+
+    // 同步完，把 Sheet 上比本地新的期別合併進分析資料
+    await mergeSheetDraws();
+
+    // 自動對獎：拿新開獎結果比對 gen_history 還沒對過的紀錄
+    try{
+      const cr = await fetch(GS_API + "?action=check_gen");
+      const cj = await cr.json();
+      if(cj.ok && cj.checked > 0 && statusEl){
+        statusEl.textContent += `｜🎯 已自動對獎 ${cj.checked} 筆` + (cj.won ? `，中獎 ${cj.won} 筆！` : "，皆未中");
+      }
+    } catch(e){ console.warn("check_gen failed:", e); }
+  } catch(e){
+    console.warn("sync_draws failed:", e);
+    if(statusEl) statusEl.textContent = "❌ 同步失敗：" + e.message + "（請確認 Apps Script 已更新並重新部署）";
+  }
+  if(btn){ btn.disabled = false; btn.textContent = "☁️ 同步官網開獎 → Sheet"; }
+}
+
+// ── 把 Sheet 上的開獎資料合併進目前 DB ──────────────────
+// 讀 draws_<彩種>，把期別比本地 CSV 還新的列接成 CSV 餵給 buildDB
+async function mergeSheetDraws(){
+  const cached = loadCache();
+  const csvMap = cached ? cached.csvMap : {};
+  let merged = 0;
+
+  for(const game of Object.keys(GAME_CFG)){
+    try{
+      const res = await fetch(GS_API + "?action=read_draws&game=" + encodeURIComponent(game) + "&limit=400");
+      const j   = await res.json();
+      if(!j.ok || !j.rows || !j.rows.length || !j.headers) continue;
+
+      const csv = [ j.headers.join(",") ]
+        .concat(j.rows.map(r => j.headers.map(h => r[h] ?? "").join(",")))
+        .join("\n");
+
+      if(!csvMap[game]) csvMap[game] = [];
+      // 同名來源只保留最新一份
+      csvMap[game] = csvMap[game].filter(f => f.name !== "__sheet_draws__");
+      csvMap[game].push({name:"__sheet_draws__", content: csv});
+      merged++;
+    } catch(e){ /* 個別彩種失敗不影響其他 */ }
+  }
+
+  if(merged){
+    saveCache(csvMap);
+    applyCSVMap(csvMap, false, Date.now());
+  }
+}
+
 // ── 時間格式化（支援 ISO / zh-TW 各種格式）──────────────
 function fmtTime(raw){
   if(!raw) return "";
@@ -904,8 +976,8 @@ function pickNums(){
   if(isDigit){
     nums=[];
     for(let i=0;i<k;i++){
-      if(currentStrat==="hot"){const s=all.slice().sort((a,b)=>(freq[b]||0)-(freq[a]||0));nums.push(s[Math.floor(Math.random()*3)]);}
-      else if(currentStrat==="cold"){const s=all.slice().sort((a,b)=>(freq[a]||0)-(freq[b]||0));nums.push(s[Math.floor(Math.random()*3)]);}
+      if(currentStrat==="hot"){const s=all.slice().sort((a,b)=>(freq[b]||0)-(freq[a]||0));nums.push(s[Math.floor(Math.random()*5)]);}
+      else if(currentStrat==="cold"){const s=all.slice().sort((a,b)=>(freq[a]||0)-(freq[b]||0));nums.push(s[Math.floor(Math.random()*5)]);}
       else nums.push(all[Math.floor(Math.random()*all.length)]);
     }
     return{nums,second:null};
@@ -927,15 +999,82 @@ function pickNums(){
   }
   else nums=sample(all,k);
   const uniq=[];nums.forEach(x=>{if(uniq.indexOf(x)<0)uniq.push(x);});nums=uniq.sort((a,b)=>a-b);
-  while(nums.length<k){const ex=all.find(x=>nums.indexOf(x)<0);if(!ex)break;nums.push(ex);nums.sort((a,b)=>a-b);}
+  while(nums.length<k){const rest=all.filter(x=>nums.indexOf(x)<0);if(!rest.length)break;nums.push(rest[Math.floor(Math.random()*rest.length)]);nums.sort((a,b)=>a-b);}
   let second=null;
   if(db.secondRange){
     const sf=db.secondFreq||{},sall=Array.from({length:db.secondRange},(_,i)=>i+1);
-    if(currentStrat==="hot")second=sall.reduce((a,b)=>(sf[a]||0)>=(sf[b]||0)?a:b);
-    else if(currentStrat==="cold")second=sall.reduce((a,b)=>(sf[a]||0)<=(sf[b]||0)?a:b);
+    if(currentStrat==="hot"){const s=sall.slice().sort((a,b)=>(sf[b]||0)-(sf[a]||0));second=s[Math.floor(Math.random()*Math.min(3,s.length))];}
+    else if(currentStrat==="cold"){const s=sall.slice().sort((a,b)=>(sf[a]||0)-(sf[b]||0));second=s[Math.floor(Math.random()*Math.min(3,s.length))];}
     else second=sall[Math.floor(Math.random()*sall.length)];
   }
   return{nums,second};
+}
+
+// ── 撞號（分彩）風險評分 ────────────────────────────────
+// 0~100，越高代表越像「大眾愛簽的組合」，中獎時越可能跟人均分。
+// 不影響中獎機率，只影響中獎時的期望獎金。
+let avoidCrowd = false;
+function setAvoidCrowd(v){ avoidCrowd = v; }
+
+function crowdScore(nums, db){
+  if(!db || db.isDigit || !nums || nums.length < 2) return null;
+  const k = nums.length, range = db.mainRange;
+  const s = nums.slice().sort((a,b)=>a-b);
+  let score = 0;
+
+  // 1) 生日區（1~31）佔比超出自然比例 → 最重的大眾偏好
+  const lowShare = s.filter(n=>n>=1&&n<=31).length / k;
+  const natural  = Math.min(31,range) / range;
+  if(lowShare > natural) score += (lowShare-natural)/(1-natural+1e-9) * 40;
+  if(lowShare === 1 && range > 31) score += 10;            // 全部都在生日區再加重
+
+  // 2) 全部 ≤12（月份/日期組合）
+  if(s[k-1] <= 12) score += 15;
+
+  // 3) 連號
+  let consec = 0;
+  for(let i=1;i<k;i++) if(s[i]-s[i-1]===1) consec++;
+  score += consec * 7;
+  if(consec >= k-1) score += 20;                            // 整組連號（1,2,3,4,5,6）
+
+  // 4) 等差數列（5,10,15...）
+  if(k >= 3){
+    const d = s[1]-s[0];
+    if(d > 1 && s.every((n,i)=>i===0 || n-s[i-1]===d)) score += 25;
+  }
+
+  // 5) 同尾數 / 同倍數
+  const mod5 = s.filter(n=>n%5===0).length;
+  if(mod5 >= k-1) score += 12;
+
+  // 6) 與上一期開獎重複（很多人照簽上期號碼）
+  const last = db.draws && db.draws.length ? db.draws[db.draws.length-1] : null;
+  if(last){
+    const dup = s.filter(n=>last.indexOf(n)>=0).length;
+    if(dup >= 3) score += dup * 6;
+  }
+
+  return Math.min(100, Math.round(score));
+}
+
+function crowdRating(score){
+  if(score === null) return null;
+  if(score < 25)  return {label:"分彩風險低", color:"#3B6D11", bg:"#EAF3DE", note:"冷門組合，若中頭彩較可能獨得"};
+  if(score < 50)  return {label:"分彩風險中", color:"#BA7517", bg:"#FAEEDA", note:"含部分大眾偏好元素"};
+  return            {label:"分彩風險高", color:"#A32D2D", bg:"#FCEBEB", note:"典型大眾組合，中獎易與多人均分"};
+}
+
+// 開啟「避開撞號」時：重抽直到風險夠低（機率不變，只挑冷門組合）
+function pickNumsAvoidCrowd(db){
+  let best = null, bestScore = 999;
+  for(let t=0; t<25; t++){
+    const r = pickNums();
+    const cs = crowdScore(r.nums, db);
+    if(cs === null) return r;
+    if(cs < bestScore){ best = r; bestScore = cs; }
+    if(cs < 25) return r;     // 夠冷門就收
+  }
+  return best;                 // 25 次內最冷門的一組
 }
 
 function coScore(nums){
@@ -969,8 +1108,9 @@ function generate(){
   // 產生 genCount 組
   const results=[];
   for(let i=0;i<genCount;i++){
-    const {nums,second}=pickNums();
+    const {nums,second}=(avoidCrowd&&!db.isDigit)?pickNumsAvoidCrowd(db):pickNums();
     const co=coScore(nums);
+    const crowd=crowdScore(nums,db);
     const pScore=!db.isDigit?calcComboPatternScore(nums,db):null;
     const pPct=pScore!==null?getPercentile(pScore,patternDistCache[currentGame]||[]):null;
     const pRat=pPct!==null?patternRating(pPct):null;
@@ -978,7 +1118,7 @@ function generate(){
     if(db.topPairs&&db.topPairs.length)
       for(const pr of db.topPairs.slice(0,5))
         if(nums.indexOf(pr.a)>=0&&nums.indexOf(pr.b)>=0){pairNote=" · 含強配對 "+pr.a+"×"+pr.b;break;}
-    results.push({nums,second,co,pScore,pPct,pRat,pairNote});
+    results.push({nums,second,co,crowd,pScore,pPct,pRat,pairNote});
   }
 
   // ── 顯示最新一組（大球區）────────────────────────────
@@ -989,6 +1129,22 @@ function generate(){
   row.style.display="flex";
   document.getElementById("score-row").textContent=
     first.co!==null?"共現分數 "+first.co+"/100"+first.pairNote:"";
+
+  // 分彩風險徽章（唯一真正影響期望獎金的指標）
+  (function(){
+    let el=document.getElementById("crowd-risk-row");
+    if(!el){
+      el=document.createElement("div");
+      el.id="crowd-risk-row";
+      el.style.cssText="margin-top:6px;font-size:12px";
+      document.getElementById("score-row").after(el);
+    }
+    const cr=crowdRating(first.crowd);
+    if(cr){
+      el.style.display="block";
+      el.innerHTML=`<span style="padding:2px 9px;border-radius:99px;background:${cr.bg};color:${cr.color};font-weight:700">🛡️ ${cr.label} ${first.crowd}/100</span> <span style="color:#999;font-size:11px">${cr.note}</span>`;
+    } else el.style.display="none";
+  })();
 
   // 規律指數
   const piEl=document.getElementById("pattern-index-row");
@@ -1745,10 +1901,22 @@ async function loadGSHistory(sheet){
     const second  = row["第二區"]  ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#378ADD;color:#fff;font-size:10px;font-weight:700;margin-left:4px">${row["第二區"]}</span>` : "";
     const special = row["特別號"] ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:#3B6D11;color:#fff;font-size:10px;font-weight:700;margin-left:4px">${row["特別號"]}</span>` : "";
 
-    const pScore = row["規律指數"] !== "" ? `<span style="font-size:11px;color:#888">規律 ${row["規律指數"]}</span>` : "";
+    const _pScoreV = row["規律指數(0-100)"] ?? row["規律指數"] ?? "";
+    const _coV     = row["共現強度(0-100)"] ?? row["共現強度"] ?? "";
+    const _stratV  = row["使用策略"] || row["策略"] || "";
+    const pScore = _pScoreV !== "" ? `<span style="font-size:11px;color:#888">規律 ${_pScoreV}</span>` : "";
     const pRat   = row["規律等級"] ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${row["規律等級"]}</span>` : "";
-    const co     = row["共現強度"] !== "" ? `<span style="font-size:11px;color:#888">共現 ${row["共現強度"]}/100</span>` : "";
-    const strat  = row["策略"] ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${row["策略"]}</span>` : "";
+    const co     = _coV !== "" ? `<span style="font-size:11px;color:#888">共現 ${_coV}/100</span>` : "";
+    const strat  = _stratV ? `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:#EDECEA;color:#5F5E5A">${_stratV}</span>` : "";
+
+    // 對獎結果（check_gen 寫回的欄位）
+    let prize = "";
+    if(row["中獎結果"]){
+      const isWin = row["中獎結果"] !== "未中";
+      prize = `<span style="font-size:10px;padding:1px 7px;border-radius:99px;background:${isWin?"#3B6D11":"#EDECEA"};color:${isWin?"#fff":"#999"};font-weight:${isWin?"700":"400"}">${isWin?"🎯 ":""}${row["中獎結果"]} 中${row["命中數"]}碼${row["第二區中"]==="✓"?"+二區":""}</span>`;
+    } else if(_stratV){
+      prize = `<span style="font-size:10px;color:#bbb">待開獎</span>`;
+    }
 
     return `<div style="background:#fff;border-radius:8px;border:1px solid #e8e7e4;padding:10px 12px;margin-bottom:6px">
       <div style="font-size:10px;color:#aaa;margin-bottom:5px">${fmtTime(row["時間"])} ${row["彩種"]||""}</div>
@@ -1756,7 +1924,7 @@ async function loadGSHistory(sheet){
         ${ballsHtml}${second}${special}
       </div>
       <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
-        ${strat}${pScore}${pRat}${co}
+        ${strat}${prize}${pScore}${pRat}${co}
       </div>
     </div>`;
   }).join("");
@@ -1889,7 +2057,13 @@ function backtestOnePeriod(game, draws, periodIdx){
   // 隨機期望值
   const rndExp = Math.round(pick*pick/range*10)/10;
 
-  return { hot:hotHits, cold:coldHits, bal:balHits, rise:riseHits, ai:aiHits, rnd:rndExp };
+  // 各策略候選池大小（平衡=熱∪冷）
+  const balSize = new Set([...hotPool, ...coldPool]).size;
+
+  return {
+    hot:hotHits, cold:coldHits, bal:balHits, rise:riseHits, ai:aiHits, rnd:rndExp,
+    pools:{ hot:hotPool.size, cold:coldPool.size, bal:balSize, rise:risePool.size, ai:aiPool.size, rnd:pick }
+  };
 }
 
 // 執行完整回測
@@ -1914,6 +2088,7 @@ async function runBacktest(){
 
   const sums = {hot:0,cold:0,bal:0,rise:0,ai:0,rnd:0};
   const cnt  = {hot:0,cold:0,bal:0,rise:0,ai:0,rnd:0};
+  const poolSums = {hot:0,cold:0,bal:0,rise:0,ai:0,rnd:0};
 
   // 分批跑，避免 UI 凍結
   const BATCH = 20;
@@ -1924,6 +2099,7 @@ async function runBacktest(){
       if(!r) continue;
       for(const k of Object.keys(sums)){
         sums[k]+=r[k]; cnt[k]++;
+        if(r.pools) poolSums[k]+=r.pools[k];
       }
     }
     // 進度
@@ -1937,8 +2113,11 @@ async function runBacktest(){
   if(btn){ btn.disabled=false; btn.textContent="▶ 執行回測"; }
 
   // 算平均
-  const avgs={};
-  for(const k of Object.keys(sums)) avgs[k]=cnt[k]?Math.round(sums[k]/cnt[k]*100)/100:0;
+  const avgs={}, pools={};
+  for(const k of Object.keys(sums)){
+    avgs[k]=cnt[k]?Math.round(sums[k]/cnt[k]*100)/100:0;
+    pools[k]=cnt[k]?Math.round(poolSums[k]/cnt[k]*10)/10:0;
+  }
   const pick = db.pick;
 
   // 存到 Sheets
@@ -1951,18 +2130,22 @@ async function runBacktest(){
 
   // 存到本地快取供圖表用
   if(!btCache) btCache={};
-  btCache[currentGame]={avgs,pick,count,ts:Date.now()};
+  btCache[currentGame]={avgs,pools,pick,count,ts:Date.now()};
 
-  renderBacktestResult(avgs, pick, count);
+  renderBacktestResult(avgs, pick, count, pools);
 }
 
 let btCache = {};
 
-function renderBacktestResult(avgs, pick, count){
+function renderBacktestResult(avgs, pick, count, pools){
   const res = document.getElementById("backtest-result");
   if(!res) return;
   const color = gc(currentGame);
+  const db    = DB[currentGame];
+  const range = db ? db.mainRange : 1;
+  pools = pools || (btCache[currentGame] && btCache[currentGame].pools) || {};
 
+  // 公平比較：實際命中 ÷ 該候選池大小的隨機期望（倍率 1.00 = 與亂選無異）
   const stratOrder = [
     {id:"bal", label:"⚖️ 平衡派"},
     {id:"ai",  label:"🤖 AI加權派"},
@@ -1970,36 +2153,41 @@ function renderBacktestResult(avgs, pick, count){
     {id:"rise",label:"📈 竄升派"},
     {id:"rnd", label:"🎲 隨機派"},
     {id:"cold",label:"❄️ 冷號派"}
-  ].sort((a,b)=>avgs[b.id]-avgs[a.id]);
-
-  const max = Math.max(...stratOrder.map(s=>avgs[s.id]), 0.01);
+  ].map(s=>{
+    const poolN = pools[s.id] || pick;
+    const exp   = pick * poolN / range;             // 該池大小下的隨機期望命中
+    const lift  = exp > 0 ? avgs[s.id] / exp : 0;   // 倍率
+    return {...s, poolN, exp, lift};
+  }).sort((a,b)=>b.lift-a.lift);
 
   let html = `<div class="vcard" style="border-top:3px solid ${color}">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div class="vcard-title" style="margin:0">回測結果（近 ${count} 期平均命中）</div>
-      <div style="font-size:10px;color:#aaa">每期選 ${pick} 個號碼</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div class="vcard-title" style="margin:0">回測結果（近 ${count} 期・公平比較）</div>
+      <div style="font-size:10px;color:#aaa">倍率 = 實際命中 ÷ 該池隨機期望</div>
+    </div>
+    <div style="font-size:10px;color:#888;margin-bottom:10px">
+      各策略候選池大小不同，直接比命中數會誤導。倍率 1.00 代表「跟在同樣大小的池子裡亂選一模一樣」。
     </div>`;
 
-  stratOrder.forEach((s,i)=>{
-    const avg  = avgs[s.id];
-    const pct  = Math.round(avg/pick*100);
-    const barW = Math.round(avg/max*100);
-    const barColor = i===0?color:i===1?"#BA7517":"#ccc";
-    const medal = i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
+  // 倍率刻度：以 1.0 為中線，左右各 25%
+  stratOrder.forEach(s=>{
+    const lift  = Math.round(s.lift*100)/100;
+    const barW  = Math.max(2, Math.min(100, (s.lift - 0.75) / 0.5 * 100)); // 0.75x~1.25x 映射 0~100%
+    const diff  = s.lift - 1;
+    const tone  = Math.abs(diff) < 0.05 ? "#999" : (diff > 0 ? "#3B6D11" : "#A32D2D");
     html += `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f0efed">
-      <span style="min-width:90px;font-size:12px">${medal}${s.label}</span>
-      <div style="flex:1;height:8px;background:#e0dedd;border-radius:4px;overflow:hidden">
-        <div style="height:100%;width:${barW}%;background:${barColor};border-radius:4px;transition:width .5s"></div>
+      <span style="min-width:90px;font-size:12px">${s.label}</span>
+      <div style="flex:1;height:8px;background:#e0dedd;border-radius:4px;overflow:hidden;position:relative">
+        <div style="position:absolute;left:50%;top:-2px;bottom:-2px;width:2px;background:#bbb"></div>
+        <div style="height:100%;width:${barW}%;background:${tone};border-radius:4px;opacity:.75;transition:width .5s"></div>
       </div>
-      <span style="font-size:13px;font-weight:700;color:${barColor};min-width:60px;text-align:right">
-        ${avg}/${pick} 顆
-      </span>
-      <span style="font-size:10px;color:#aaa;min-width:36px">命中率 ${pct}%</span>
+      <span style="font-size:13px;font-weight:700;color:${tone};min-width:52px;text-align:right">${lift.toFixed(2)}x</span>
+      <span style="font-size:10px;color:#aaa;min-width:150px;text-align:right">命中 ${avgs[s.id]}｜期望 ${Math.round(s.exp*100)/100}｜池 ${s.poolN} 個</span>
     </div>`;
   });
 
   html += `<div style="font-size:10px;color:#aaa;margin-top:8px;text-align:center">
-    ⚠️ 回測為歷史統計，不代表未來表現。彩券為真隨機事件。
+    中線 = 1.00x（純隨機）。所有策略長期都會貼著中線，這就是「彩券無法預測」的實驗證據。
   </div></div>`;
 
   res.innerHTML = html;
@@ -2065,7 +2253,7 @@ function renderTrend(){
   // 如果有快取的回測結果，直接顯示
   if(btCache[currentGame]){
     const c = btCache[currentGame];
-    renderBacktestResult(c.avgs, c.pick, c.count);
+    renderBacktestResult(c.avgs, c.pick, c.count, c.pools);
   }
 }
 
